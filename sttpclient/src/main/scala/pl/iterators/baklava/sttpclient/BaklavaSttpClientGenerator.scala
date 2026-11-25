@@ -103,9 +103,8 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
     val referenced = tagCalls.flatMap(referencedClassesInCall).distinct
 
     val needsTypedReq = endpointGroups.exists { case (_, ec) =>
-      val cap  = uniformBodyContentType(ec).forall(_.toLowerCase.contains("json"))
-      val body = ec.headOption.flatMap(_.request.bodySchema).filterNot(isEmptyBodyInstance)
-      cap && body.exists(isTypedBodySchema)
+      val cap = uniformBodyContentType(ec).forall(_.toLowerCase.contains("json"))
+      cap && uniformTypedRequestSchema(requestBodySchemas(ec)).isDefined
     }
 
     val importLines = new scala.collection.mutable.ListBuffer[String]
@@ -153,12 +152,13 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
     val pathParams  = req.pathParametersSeq
     val queryParams = req.queryParametersSeq
     val declaredHs  = req.headersSeq.filterNot(h => isSpecialHeader(h.name))
-    val bodySchema  = req.bodySchema.filterNot(isEmptyBodyInstance)
+    val bodySchemas = requestBodySchemas(endpointCalls)
+    val bodySchema  = bodySchemas.headOption
 
     // Typed circe bodies are JSON-only; if the capture declared a non-JSON content-type (multipart, form-urlencoded, …), fall back
     // to the raw `bodyJson: String` path so `.contentType(...)` gets emitted and the user can pass the already-encoded payload.
     val captureIsJsonish = bodyMediaType.forall(_.toLowerCase.contains("json"))
-    val typedReqSchema   = if (captureIsJsonish) bodySchema.filter(isTypedBodySchema) else None
+    val typedReqSchema   = if (captureIsJsonish) uniformTypedRequestSchema(bodySchemas) else None
     val typedRespSchema  = uniformTypedResponseSchema(endpointCalls)
 
     val pathParamDefs  = pathParams.map(p => s"${scalaSafeIdent(p.name)}: ${scalaType(p.schema)}")
@@ -248,8 +248,7 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
   private def endpointUsesCirce(ec: Seq[BaklavaSerializableCall]): Boolean = {
     val bodyMediaType    = uniformBodyContentType(ec)
     val captureIsJsonish = bodyMediaType.forall(_.toLowerCase.contains("json"))
-    val bodySchema       = ec.headOption.flatMap(_.request.bodySchema).filterNot(isEmptyBodyInstance)
-    val typedReq         = captureIsJsonish && bodySchema.exists(isTypedBodySchema)
+    val typedReq         = captureIsJsonish && uniformTypedRequestSchema(requestBodySchemas(ec)).isDefined
     typedReq || uniformTypedResponseSchema(ec).isDefined
   }
 
@@ -263,6 +262,12 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
     case SchemaType.ArrayType                                                => schema.items.exists(isTypedBodySchema)
     case _                                                                   => false
   }
+
+  private def requestBodySchemas(endpointCalls: Seq[BaklavaSerializableCall]): Seq[BaklavaSchemaSerializable] =
+    endpointCalls.flatMap(_.request.bodySchema).filterNot(isEmptyBodyInstance).distinct
+
+  private def uniformTypedRequestSchema(bodySchemas: Seq[BaklavaSchemaSerializable]): Option[BaklavaSchemaSerializable] =
+    if (bodySchemas.map(scalaType).distinct.size == 1) bodySchemas.headOption.filter(isTypedBodySchema) else None
 
   /** If *every* 2xx capture on this endpoint has a typed, non-empty body schema, all render to the same Scala type, AND all declare a
     * JSON-ish `responseContentType`, return the common schema. Otherwise fall back to the untyped `Either[String, String]` response so

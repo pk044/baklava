@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { oc } from "@orpc/contract";
-import { webhookAckSchema, webhookPayloadSchema } from "./webhooks.schemas";
+import { webhookAckSchema, webhookBatchSchema, webhookPayloadSchema, webhookQueuedSchema } from "./webhooks.schemas";
 
 export const webhooks = {
   post: oc
@@ -16,7 +16,7 @@ export const webhooks = {
       spec: (current) => ({ ...current, security: [{ apiKey: [] }] })
     })
     .input(z.object({
-      body: webhookPayloadSchema
+      body: z.union([webhookPayloadSchema, webhookBatchSchema])
     }))
-    .output(z.union([webhookAckSchema, z.string()]))
+    .output(z.union([webhookAckSchema, webhookQueuedSchema, z.string()]))
 };

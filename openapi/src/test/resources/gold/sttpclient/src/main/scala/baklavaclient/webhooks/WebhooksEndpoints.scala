@@ -1,9 +1,6 @@
 package baklavaclient.webhooks
 
 import sttp.client4._
-import sttp.client4.circe._
-import io.circe.generic.auto._
-import io.circe.syntax._
 import sttp.model.Uri
 
 object WebhooksEndpoints {
@@ -13,12 +10,12 @@ object WebhooksEndpoints {
       baseUri: Uri,
       apiKeyValue: String
   )(
-      body: WebhookPayload
+      bodyJson: String
   ): Request[Either[String, String]] = {
     basicRequest
       .post(baseUri.addPath("webhooks"))
       .header("X-API-Key", apiKeyValue)
-      .body(body.asJson.noSpaces)
+      .body(bodyJson)
       .contentType("application/json")
   }
 }

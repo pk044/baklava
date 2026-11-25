@@ -433,6 +433,15 @@ class ComprehensiveGoldSpec
           nextResponse = jsonResponse(Accepted, WebhookAck(received = true).asJson.noSpaces)
           ctx.performRequest(routes)
         },
+      onRequest(
+        body = WebhookBatch(Seq(WebhookPayload("order.created", """{"id":1}"""), WebhookPayload("order.paid", """{"id":1}"""))),
+        security = apiKey("secret-key")
+      )
+        .respondsWith[WebhookQueued](Accepted, description = "Webhook batch queued")
+        .assert { ctx =>
+          nextResponse = jsonResponse(Accepted, WebhookQueued(position = 3).asJson.noSpaces)
+          ctx.performRequest(routes)
+        },
       onRequest(body = WebhookPayload("order.created", """{"id":1}"""), security = apiKey("secret-key"))
         .respondsWith[String](Accepted, description = "Legacy plain-text ack")
         .assert { ctx =>
@@ -769,6 +778,8 @@ object ComprehensiveGoldSpec {
   case class ErrorResponse(code: String, message: String, details: Option[Seq[String]])
   case class WebhookPayload(event: String, data: String)
   case class WebhookAck(received: Boolean)
+  case class WebhookBatch(events: Seq[WebhookPayload])
+  case class WebhookQueued(position: Int)
   case class HealthResponse(status: String, uptimeSeconds: Long)
 
   case class PhotoVariant(url: String, width: Int, height: Int, format: String)

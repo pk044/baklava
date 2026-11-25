@@ -29,6 +29,28 @@ class BaklavaDslFormatterSimpleSpec extends AnyFunSpec with Matchers {
       html should include("Bob")
     }
 
+    it("renders every distinct request schema, labelled by class, when calls send different body types (#139)") {
+      def sending(desc: String, schema: BaklavaSchemaSerializable) = {
+        val c = jsonCall(status = 200, desc = desc, requestBody = "{}", responseBody = "{}")
+        c.copy(request = c.request.copy(bodySchema = Some(schema)))
+      }
+      val voice = objectSchema(Map("voice" -> stringRequired)).copy(className = "VoiceCommand")
+      val text  = objectSchema(Map("text" -> stringRequired)).copy(className = "TextCommand")
+
+      val html = generator.generateEndpointPage(Seq(sending("Voice", voice), sending("Text", text), sending("Voice again", voice)))
+
+      html should include("Request schema: VoiceCommand (JSON Schema v7)")
+      html should include("Request schema: TextCommand (JSON Schema v7)")
+      html.split("Request schema: VoiceCommand", -1).length - 1 shouldBe 1
+    }
+
+    it("keeps the unlabelled request schema when every call sends the same type") {
+      val c    = jsonCall(status = 200, desc = "Only", requestBody = "{}", responseBody = "{}")
+      val html = generator.generateEndpointPage(Seq(c.copy(request = c.request.copy(bodySchema = Some(objectSchema(Map.empty))))))
+
+      html should include("Request schema (JSON Schema v7)")
+    }
+
     it("produces a deterministic top-level `required` list in the JSON Schema regardless of input order") {
       val schemaA = objectSchema(Map("b" -> stringRequired, "a" -> stringRequired, "c" -> stringRequired))
       val schemaB = objectSchema(Map("c" -> stringRequired, "b" -> stringRequired, "a" -> stringRequired))

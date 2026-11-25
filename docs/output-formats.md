@@ -79,6 +79,10 @@ Generates a single OpenAPI 3.0.1 YAML specification file containing:
 
 When multiple test cases cover the same endpoint with different inputs/outputs, they appear as separate examples in the OpenAPI spec.
 
+When the test cases of one status and content type return different body types, the response schema lists every one of them under `oneOf`, so each example conforms to the schema it is listed under. The same applies to request bodies: test cases that send different body types produce a `oneOf` request schema. When all test cases agree on a type, the schema is that type alone, as before.
+
+`oneOf` requires an example to match exactly one of the listed schemas. Baklava does not mark object schemas closed, so if one body type's required fields are a subset of another's, an example of the larger type also matches the smaller one and a strict example linter reports it. Give each body type a field the others don't require if you lint examples.
+
 ### Configuration
 
 ```scala
@@ -419,7 +423,7 @@ Request-body typing and response typing are decided independently.
 - Decoding: `.response(asJson[SomeResponse])`
 - File imports `sttp.client4.circe._` + `io.circe.generic.auto._`
 
-**Raw fallback** — when the body isn't a named case class (multipart/form, plain text, empty), the endpoint keeps the raw `bodyJson: String` input. When the response isn't a named JSON schema (or 2xx responses are mixed JSON and non-JSON), the endpoint keeps the raw `Either[String, String]` response. An endpoint can mix a typed body with a raw response (or vice versa) — each side is gated on its own.
+**Raw fallback** — when the body isn't a named case class (multipart/form, plain text, empty), or the test cases of an endpoint send different body types, the endpoint keeps the raw `bodyJson: String` input. When the response isn't a named JSON schema (or 2xx responses are mixed JSON and non-JSON), the endpoint keeps the raw `Either[String, String]` response. An endpoint can mix a typed body with a raw response (or vice versa) — each side is gated on its own.
 
 Consumers need `sttp-client4-circe` and `circe-generic` on the classpath when any endpoint hits the typed paths above.
 
@@ -655,5 +659,6 @@ const newUser: Common.User = await createUser(client, { body: { name: "Alice" } 
 
 - `BaklavaClient.authHeaders()` only materializes `Authorization` for bearer/basic/OAuth/OpenID Connect schemes. API-key-in-header schemes are injected per-endpoint based on `client.apiKeys`; API-key-in-query schemes go through `url.searchParams`; API-key-in-cookie schemes emit a `Cookie` header (which browsers may override for cross-origin requests).
 - When an endpoint declares multiple 2xx responses with different body schemas, the return type is a `A | B` union of all distinct schemas. You can narrow at the call site with `typeof` / `in` checks.
+- When the test cases of an endpoint send different request body types, `params.body` is typed as their `A | B` union.
 - Responses are decoded as JSON only when the response `Content-Type` contains `application/json`. Any other content type falls through to the raw text (cast to the declared return type), so plain-text 2xx responses don't crash the parser.
 - Request bodies are `JSON.stringify`d when the captured `requestContentType` is JSON (or unspecified). For captures with a non-JSON `requestContentType`, the body is passed through as `BodyInit` and the generator emits the captured `Content-Type` header — supply `FormData`, `Blob`, `URLSearchParams`, or a `string` at the call site.

@@ -216,13 +216,18 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
     val pathParams      = req.pathParametersSeq
     val queryParams     = req.queryParametersSeq
     val declaredHeaders = req.headersSeq.filterNot(h => isSpecialHeader(h.name))
-    val bodySchema      = req.bodySchema
+    val bodySchemas     = endpointCalls.flatMap(_.request.bodySchema).filterNot(isEmptyBodyInstance).distinct
+    val bodyType        = bodySchemas.map(tsType).distinct match {
+      case Seq()       => None
+      case Seq(single) => Some(single)
+      case many        => Some(many.mkString(" | "))
+    }
 
     val paramFields = (
       pathParams.map(p => (p.name, tsType(p.schema), true)) ++
         queryParams.map(p => (p.name, tsType(p.schema), p.schema.required)) ++
         declaredHeaders.map(h => (h.name, tsType(h.schema), h.schema.required)) ++
-        bodySchema.toSeq.filterNot(isEmptyBodyInstance).map(s => ("body", tsType(s), true))
+        bodyType.toSeq.map(t => ("body", t, true))
     )
     val anyParamRequired  = paramFields.exists(_._3)
     val paramsArgOptional = !anyParamRequired
@@ -247,7 +252,7 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
     val urlExpr = renderUrlExpression(req, pathParams.map(_.name), queryParams.map(_.name))
 
     val bodyContentType = uniformBodyContentType(endpointCalls)
-    val hasBody         = bodySchema.exists(!isEmptyBodyInstance(_))
+    val hasBody         = bodyType.isDefined
     val isJsonBody      = hasBody && bodyContentType.forall(_.toLowerCase.contains("application/json"))
 
     val needsAuthHeaders = req.securitySchemes.exists { s =>

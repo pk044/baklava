@@ -1123,16 +1123,35 @@ paths:
         content:
           application/json:
             schema:
-              required:
-              - data
-              - event
-              type: object
-              properties:
-                event:
-                  type: string
-                data:
-                  type: string
-              x-class: WebhookPayload
+              oneOf:
+              - required:
+                - data
+                - event
+                type: object
+                properties:
+                  event:
+                    type: string
+                  data:
+                    type: string
+                x-class: WebhookPayload
+              - required:
+                - events
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      required:
+                      - data
+                      - event
+                      type: object
+                      properties:
+                        event:
+                          type: string
+                        data:
+                          type: string
+                      x-class: WebhookPayload
+                x-class: WebhookBatch
             examples:
               Legacy plain-text ack:
                 value:
@@ -1142,23 +1161,42 @@ paths:
                 value:
                   event: order.created
                   data: "{\"id\":1}"
+              Webhook batch queued:
+                value:
+                  events:
+                  - event: order.created
+                    data: "{\"id\":1}"
+                  - event: order.paid
+                    data: "{\"id\":1}"
       responses:
         "202":
-          description: Legacy plain-text ack / Webhook accepted
+          description: Legacy plain-text ack / Webhook accepted / Webhook batch queued
           content:
             application/json:
               schema:
-                required:
-                - received
-                type: object
-                properties:
-                  received:
-                    type: boolean
-                x-class: WebhookAck
+                oneOf:
+                - required:
+                  - received
+                  type: object
+                  properties:
+                    received:
+                      type: boolean
+                  x-class: WebhookAck
+                - required:
+                  - position
+                  type: object
+                  properties:
+                    position:
+                      type: integer
+                      format: int32
+                  x-class: WebhookQueued
               examples:
                 Webhook accepted:
                   value:
                     received: true
+                Webhook batch queued:
+                  value:
+                    position: 3
             text/plain:
               schema:
                 type: string

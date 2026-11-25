@@ -164,11 +164,13 @@ class BaklavaDslFormatterSimple extends BaklavaDslFormatter {
       )
     }
 
-    // Shared request-schema block (same for every call on this endpoint).
-    val requestSchemaBlock =
-      request.bodySchema.map(schema =>
-        s"<details><summary>Request schema (JSON Schema v7)</summary><pre>${escHtml(baklavaSchemaToJsonSchemaV7(schema))}</pre></details>"
-      )
+    val requestSchemas     = calls.flatMap(_.request.bodySchema).distinct
+    val requestSchemaBlock = Option.when(requestSchemas.nonEmpty) {
+      requestSchemas.map { schema =>
+        val label = if (requestSchemas.size == 1) "Request schema" else s"Request schema: ${escHtml(schema.className)}"
+        s"<details><summary>$label (JSON Schema v7)</summary><pre>${escHtml(baklavaSchemaToJsonSchemaV7(schema))}</pre></details>"
+      }.mkString
+    }
 
     val responseSections = calls.sortBy(c => (c.response.status.code, c.request.responseDescription.getOrElse(""))).map { c =>
       val status    = c.response.status.code

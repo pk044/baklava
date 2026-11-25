@@ -1,12 +1,12 @@
 import { BaklavaClient, BaklavaHttpError } from "../client";
-import type { WebhookAck, WebhookPayload } from "./types";
+import type { WebhookAck, WebhookBatch, WebhookPayload, WebhookQueued } from "./types";
 
 /** Deliver webhook — Accept a webhook payload */
 export async function deliverWebhook(client: BaklavaClient, params: {
-  body: WebhookPayload;
-}): Promise<WebhookAck | string> {
+  body: WebhookPayload | WebhookBatch;
+}): Promise<WebhookAck | WebhookQueued | string> {
   const url = new URL(`${client.baseUrl}/webhooks`);
-  let __ret!: WebhookAck | string;
+  let __ret!: WebhookAck | WebhookQueued | string;
   const res = await client.fetch(url.toString(), {
     method: "POST",
     headers: {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { initContract } from "@ts-rest/core";
-import { webhookAckSchema, webhookPayloadSchema } from "./webhooks.schemas";
+import { webhookAckSchema, webhookBatchSchema, webhookPayloadSchema, webhookQueuedSchema } from "./webhooks.schemas";
 
 export const webhooks = initContract().router({
   post: {
@@ -8,9 +8,9 @@ export const webhooks = initContract().router({
     description: 'Accept a webhook payload\n\nRequires authentication: apiKey (API key in header X-API-Key).',
     method: 'POST',
     path: '/webhooks',
-    body: webhookPayloadSchema,
+    body: z.union([webhookPayloadSchema, webhookBatchSchema]),
     responses: {
-      202: z.union([webhookAckSchema, z.string()])
+      202: z.union([webhookAckSchema, webhookQueuedSchema, z.string()])
     }
   }
 });

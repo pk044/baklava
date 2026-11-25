@@ -206,6 +206,37 @@ class BaklavaSttpClientGeneratorSpec extends AnyFunSpec with Matchers {
       content should include(".response(asJson[User])")
     }
 
+    it("falls back to the raw `bodyJson: String` path when calls send different body types (#139)") {
+      cleanSrc()
+      val voice = namedObject("VoiceCommand", Map("voice" -> Schema.stringSchema))
+      val text  = namedObject("TextCommand", Map("text" -> Schema.stringSchema))
+      val base  = getCall("/commands", tag = Some("Commands")).let(c => c.copy(request = c.request.copy(method = Some(Method("POST")))))
+      def sending(schema: BaklavaSchemaSerializable) = base.copy(
+        request = base.request.copy(bodySchema = Some(schema)),
+        response = base.response.copy(requestContentType = Some("application/json"))
+      )
+
+      val content = generateAndRead("src/main/scala/baklavaclient/commands/CommandsEndpoints.scala", Seq(sending(voice), sending(text)))
+      content should include("bodyJson: String")
+      content should include(".body(bodyJson)")
+      content should not include "body: VoiceCommand"
+      content should not include "import io.circe.syntax._"
+    }
+
+    it("keeps a typed body when every call sends the same type (#139)") {
+      cleanSrc()
+      val voice = namedObject("VoiceCommand", Map("voice" -> Schema.stringSchema))
+      val base  = getCall("/commands", tag = Some("Commands")).let(c => c.copy(request = c.request.copy(method = Some(Method("POST")))))
+      val call  = base.copy(
+        request = base.request.copy(bodySchema = Some(voice)),
+        response = base.response.copy(requestContentType = Some("application/json"))
+      )
+
+      val content = generateAndRead("src/main/scala/baklavaclient/commands/CommandsEndpoints.scala", Seq(call, call))
+      content should include("body: VoiceCommand")
+      content should include(".body(body.asJson.noSpaces)")
+    }
+
     it("keeps the raw `bodyJson: String` path for endpoints whose schema isn't a named case class") {
       cleanSrc()
       val content = generateAndRead(

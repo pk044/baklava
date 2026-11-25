@@ -62,8 +62,8 @@ object BaklavaDslFormatterOpenAPIWorker {
             .foreach { case (contentType, unsortedContentTypeCalls) =>
               val commonContentTypeCalls = unsortedContentTypeCalls.sortBy(_.request.responseDescription.getOrElse(""))
               val mediaType              = new io.swagger.v3.oas.models.media.MediaType()
-              val firstSchema            = commonContentTypeCalls.flatMap(_.response.bodySchema).headOption
-              firstSchema.foreach(schema => mediaType.schema(baklavaSchemaToOpenAPISchema(schema)))
+              val bodySchema             = combinedBodySchema(commonContentTypeCalls.flatMap(_.response.bodySchema))
+              bodySchema.foreach(mediaType.schema)
 
               val usedExampleKeys = scala.collection.mutable.Set.empty[String]
               commonContentTypeCalls.zipWithIndex.foreach { case (BaklavaSerializableCall(ctx, response), idx) =>
@@ -77,7 +77,7 @@ object BaklavaDslFormatterOpenAPIWorker {
                 )
               }
 
-              if (firstSchema.isDefined) {
+              if (bodySchema.isDefined) {
                 val _ = content.addMediaType(contentType.getOrElse("application/octet-stream"), mediaType)
                 anyMediaTypeEmitted = true
               }
@@ -99,16 +99,16 @@ object BaklavaDslFormatterOpenAPIWorker {
           .toList
           .sortBy(_._1.getOrElse(""))
           .foreach { case (contentType, unsortedCalls) =>
-            val calls       = unsortedCalls.sortBy(_.request.responseDescription.getOrElse(""))
-            val firstSchema = calls.flatMap(_.request.bodySchema).headOption
-            val hasAnyBody  = calls.exists(_.request.bodyString.nonEmpty)
+            val calls      = unsortedCalls.sortBy(_.request.responseDescription.getOrElse(""))
+            val bodySchema = combinedBodySchema(calls.flatMap(_.request.bodySchema))
+            val hasAnyBody = calls.exists(_.request.bodyString.nonEmpty)
 
             // Emit a media-type entry when there's either a captured contentType, a schema,
             // or some request body evidence — skipping only the pure "no body at all" case
             // (e.g. GET requests with no payload).
-            if (contentType.isDefined || firstSchema.isDefined || hasAnyBody) {
+            if (contentType.isDefined || bodySchema.isDefined || hasAnyBody) {
               val mediaType = new io.swagger.v3.oas.models.media.MediaType()
-              firstSchema.foreach(schema => mediaType.schema(baklavaSchemaToOpenAPISchema(schema)))
+              bodySchema.foreach(mediaType.schema)
 
               val usedRequestExampleKeys = scala.collection.mutable.Set.empty[String]
               calls.zipWithIndex.foreach { case (call, idx) =>
@@ -404,6 +404,13 @@ object BaklavaDslFormatterOpenAPIWorker {
       .flatMap(_.response.headers.find(_.name.toLowerCase == lowered).map(_.value))
       .nextOption()
   }
+
+  private def combinedBodySchema(schemas: Seq[BaklavaSchemaSerializable]): Option[Schema[?]] =
+    schemas.distinct match {
+      case Seq()       => None
+      case Seq(single) => Some(baklavaSchemaToOpenAPISchema(single))
+      case many        => Some(new io.swagger.v3.oas.models.media.ComposedSchema().oneOf(many.map(baklavaSchemaToOpenAPISchema).asJava))
+    }
 
   private def baklavaSchemaToOpenAPISchema(baklavaSchema: BaklavaSchemaSerializable): Schema[?] = {
     val schema = new Schema[String]()

@@ -186,6 +186,19 @@ class BaklavaTsFetchGeneratorSpec extends AnyFunSpec with Matchers {
       ts should include("""("a" | "b")[]""")
     }
 
+    it("types the body as a union when calls send different body types (#139)") {
+      val voice                                      = namedObject("VoiceCommand", Map("voice" -> Schema.stringSchema))
+      val text                                       = namedObject("TextCommand", Map("text" -> Schema.stringSchema))
+      val base                                       = getCall("/commands", tag = Some("Commands"))
+      def sending(schema: BaklavaSchemaSerializable) = base.copy(
+        request = base.request.copy(bodySchema = Some(schema)),
+        response = base.response.copy(requestContentType = Some("application/json"))
+      )
+      val ts = generateAndRead("src/commands/endpoints.ts", Seq(sending(voice), sending(text), sending(voice)))
+      ts should include("body: VoiceCommand | TextCommand;")
+      ts should include("body: JSON.stringify(params.body),")
+    }
+
     it("skips JSON.stringify when the captured request content-type is not application/json") {
       val hdr  = BaklavaHeaderSerializable("X-Trace-Id", None, BaklavaSchemaSerializable(Schema.stringSchema))
       val body = namedObject("Upload", Map("name" -> Schema.stringSchema))
