@@ -104,23 +104,23 @@ private[postman] object BaklavaPostmanCollection {
       }
       .toSeq
 
-    val rawBase   = "{{baseUrl}}"
-    val rawPath   = postmanPath.mkString("/")
-    val queryJson = call.request.queryParametersSeq.sortBy(_.name).map { q =>
+    val rawBase      = "{{baseUrl}}"
+    val rawPath      = postmanPath.mkString("/")
+    val queryEntries = call.request.queryParametersSeq.sortBy(_.name).flatMap(q => queryValues(q).map(q -> _))
+    val queryJson    = queryEntries.map { case (q, value) =>
       Json.obj(
         "key"         -> Json.fromString(q.name),
-        "value"       -> q.example.map(Json.fromString).getOrElse(Json.fromString("")),
+        "value"       -> Json.fromString(value),
         "description" -> q.description.map(Json.fromString).getOrElse(Json.Null)
       )
     }
     val rawQuery =
       if (queryJson.isEmpty) ""
       else
-        "?" + call.request.queryParametersSeq
-          .sortBy(_.name)
-          .map { q =>
+        "?" + queryEntries
+          .map { case (q, value) =>
             val k = URLEncoder.encode(q.name, StandardCharsets.UTF_8.name())
-            val v = URLEncoder.encode(q.example.getOrElse(""), StandardCharsets.UTF_8.name())
+            val v = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
             s"$k=$v"
           }
           .mkString("&")
@@ -128,7 +128,7 @@ private[postman] object BaklavaPostmanCollection {
     val variables = call.request.pathParametersSeq.map { p =>
       Json.obj(
         "key"         -> Json.fromString(p.name),
-        "value"       -> p.example.map(Json.fromString).getOrElse(Json.fromString("")),
+        "value"       -> Json.fromString(pathValue(p)),
         "description" -> p.description.map(Json.fromString).getOrElse(Json.Null)
       )
     }
@@ -140,6 +140,15 @@ private[postman] object BaklavaPostmanCollection {
       "query"    -> (if (queryJson.isEmpty) Json.Null else Json.arr(queryJson: _*)),
       "variable" -> (if (variables.isEmpty) Json.Null else Json.arr(variables: _*))
     )
+  }
+
+  private def queryValues(q: BaklavaQueryParamSerializable): Seq[String] =
+    if (q.exampleValues.isEmpty) Seq(q.example.getOrElse(""))
+    else q.collectionStyle.delimiter.fold(q.exampleValues)(delimiter => Seq(q.exampleValues.mkString(delimiter)))
+
+  private def pathValue(p: BaklavaPathParamSerializable): String = {
+    val values = if (p.exampleValues.nonEmpty) p.exampleValues else p.example.toSeq
+    if (values.isEmpty) "" else p.style.prefix(p.name) + values.mkString(p.style.separator(p.name))
   }
 
   /** Request headers: declared ones with their captured example values. Skip `Authorization`/`Content-Type` — Postman derives those from

@@ -244,7 +244,7 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
       if (paramFields.isEmpty) "client: BaklavaClient"
       else s"client: BaklavaClient, params${if (paramsArgOptional) "?" else ""}: $paramsType"
 
-    val urlExpr = renderUrlExpression(req, pathParams.map(_.name), queryParams.map(_.name))
+    val urlExpr = renderUrlExpression(req, pathParams, queryParams)
 
     val bodyContentType = uniformBodyContentType(endpointCalls)
     val hasBody         = bodySchema.exists(!isEmptyBodyInstance(_))
@@ -436,24 +436,38 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
 
   private def renderUrlExpression(
       req: BaklavaRequestContextSerializable,
-      pathParamNames: Seq[String],
-      queryParamNames: Seq[String]
+      pathParams: Seq[BaklavaPathParamSerializable],
+      queryParams: Seq[BaklavaQueryParamSerializable]
   ): String = {
-    val filled = pathParamNames.foldLeft(req.symbolicPath) { (acc, name) =>
-      acc.replace(s"{$name}", s"$${encodeURIComponent(String(${tsAccessor("params", name, optional = false)}))}")
+    val filled = pathParams.foldLeft(req.symbolicPath) { (acc, p) =>
+      acc.replace(s"{${p.name}}", renderPathSegment(p))
     }
-    val urlLine    = s"""  const url = new URL(`$${client.baseUrl}$filled`);"""
-    val queryLines = queryParamNames.map { name =>
-      s"""  if (${tsAccessor("params", name, optional = true)} !== undefined) url.searchParams.set("$name", String(${tsAccessor(
-          "params",
-          name,
-          optional = false
-        )}));"""
-    }
+    val urlLine          = s"""  const url = new URL(`$${client.baseUrl}$filled`);"""
+    val queryLines       = queryParams.map(renderQueryLine)
     val apiKeyQueryLines = req.securitySchemes.flatMap(_.security.apiKeyInQuery.toSeq).map { k =>
       s"""  if (client.apiKeys?.["${k.name}"]) url.searchParams.set("${k.name}", client.apiKeys["${k.name}"]);"""
     }
     (urlLine +: (queryLines ++ apiKeyQueryLines)).mkString("\n")
+  }
+
+  private def renderPathSegment(p: BaklavaPathParamSerializable): String = {
+    val value  = tsAccessor("params", p.name, optional = false)
+    val prefix = p.style.prefix(p.name)
+    if (p.schema.`type` == SchemaType.ArrayType)
+      s"""$prefix$${$value.map((value) => encodeURIComponent(String(value))).join("${p.style.separator(p.name)}")}"""
+    else s"$prefix$${encodeURIComponent(String($value))}"
+  }
+
+  private def renderQueryLine(p: BaklavaQueryParamSerializable): String = {
+    val defined = s"${tsAccessor("params", p.name, optional = true)} !== undefined"
+    val value   = tsAccessor("params", p.name, optional = false)
+    if (p.schema.`type` != SchemaType.ArrayType) s"""  if ($defined) url.searchParams.set("${p.name}", String($value));"""
+    else
+      p.collectionStyle.delimiter match {
+        case None            => s"""  if ($defined) for (const value of $value) url.searchParams.append("${p.name}", String(value));"""
+        case Some(delimiter) =>
+          s"""  if ($defined && $value.length > 0) url.searchParams.set("${p.name}", $value.map(String).join("$delimiter"));"""
+      }
   }
 
   /** If every captured call on this endpoint declared the same non-empty request content-type, return it. */

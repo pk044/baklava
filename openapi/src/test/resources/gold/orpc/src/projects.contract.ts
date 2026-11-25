@@ -74,7 +74,8 @@ export const projects = {
           spec: (current) => ({ ...current, security: [{ oauth2: [] }] })
         })
         .input(z.object({
-          params: z.object({projectId: z.number().int()})
+          params: z.object({projectId: z.number().int()}),
+          query: z.object({label: z.array(z.string()), assigneeIds: z.array(z.number().int()), fields: z.array(z.string()).nullish()})
         }))
         .output(z.array(taskSchema)),
       post: oc

@@ -4,7 +4,7 @@ import com.sun.net.httpserver.{HttpExchange, HttpServer}
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers
 import pl.iterators.baklava.scalatest.{BaklavaScalatest, ScalatestAsExecution}
-import pl.iterators.baklava.{BaklavaAssertionException, EmptyBody, FormOf, Multipart, TextPart}
+import pl.iterators.baklava.{BaklavaAssertionException, CollectionStyle, EmptyBody, FormOf, Multipart, PathStyle, TextPart}
 import sttp.client4.SyncBackend
 import sttp.model.{Header => SttpHeader, Method, StatusCode, Uri}
 
@@ -132,6 +132,45 @@ class BaklavaSttpDslSpec
         .assert { ctx =>
           val ex = intercept[BaklavaAssertionException](ctx.performRequest(defaultBackend))
           ex.getMessage should include("Failed to decode response body")
+        }
+    )
+  )
+
+  path("/echo/query")(
+    supports(
+      Method.GET,
+      queryParameters = (
+        q[Seq[Int]]("exploded"),
+        q[Seq[Int]]("comma", collectionStyle = CollectionStyle.CommaSeparated),
+        q[Seq[Int]]("pipe", collectionStyle = CollectionStyle.PipeDelimited),
+        q[Seq[Int]]("space", collectionStyle = CollectionStyle.SpaceDelimited)
+      ),
+      summary = "collection query parameters"
+    )(
+      onRequest(queryParameters = (Seq(1, 2), Seq(1, 2), Seq(1, 2), Seq(1, 2)))
+        .respondsWith[String](StatusCode.Ok, description = "each style reaches the server in its own wire format")
+        .assert { ctx =>
+          val response = ctx.performRequest(defaultBackend)
+          findHeader(response.headers, "X-Req-Uri") shouldBe Some("/echo/query?exploded=1&exploded=2&comma=1,2&pipe=1%7C2&space=1%202")
+        }
+    )
+  )
+
+  path("/echo/path/{simple}/{label}/{matrix}")(
+    supports(
+      Method.GET,
+      pathParameters = (
+        p[Seq[Int]]("simple"),
+        p[Seq[Int]]("label", style = PathStyle.LabelExploded),
+        p[Seq[Int]]("matrix", style = PathStyle.MatrixExploded)
+      ),
+      summary = "styled path parameters"
+    )(
+      onRequest(pathParameters = (Seq(3, 4), Seq(3, 4), Seq(3, 4)))
+        .respondsWith[String](StatusCode.Ok, description = "each style reaches the server in its own wire format")
+        .assert { ctx =>
+          val response = ctx.performRequest(defaultBackend)
+          findHeader(response.headers, "X-Req-Uri") shouldBe Some("/echo/path/3,4/.3.4/;matrix=3;matrix=4")
         }
     )
   )

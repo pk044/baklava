@@ -13,10 +13,15 @@ object TasksEndpoints {
       baseUri: Uri,
       oauth2Token: String
   )(
-      projectId: Long
+      projectId: Long,
+      label: Seq[String],
+      assigneeIds: Seq[Long],
+      fields: Option[Seq[String]] = None
   ): Request[Either[ResponseException[String], Seq[Task]]] = {
     basicRequest
-      .get(baseUri.addPath("projects", s"$projectId", "tasks"))
+      .get(baseUri.addPath("projects", s"$projectId", "tasks")        .addParams(label.map(value => "label" -> value.toString): _*)
+        .addParam("assigneeIds", if (assigneeIds.isEmpty) None else Some(assigneeIds.map(_.toString).mkString(",")))
+        .addParam("fields", fields.filter(_.nonEmpty).map(_.map(_.toString).mkString("|"))))
       .header("Authorization", s"Bearer ${oauth2Token}")
       .response(asJson[Seq[Task]])
   }

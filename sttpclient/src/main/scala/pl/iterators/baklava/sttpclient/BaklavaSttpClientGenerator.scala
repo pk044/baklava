@@ -190,13 +190,8 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
       if (secondList.isEmpty) s"(\n      $firstGroup\n  )"
       else s"(\n      $firstGroup\n  )(\n      ${secondList.mkString(",\n      ")}\n  )"
 
-    val pathExpr      = renderPathExpression(req.symbolicPath, pathParams.map(_.name))
-    val queryAddLines = queryParams.map { p =>
-      val name = p.name
-      val id   = scalaSafeIdent(name)
-      if (p.schema.required) s"""        .addParam("$name", $id.toString)"""
-      else s"""        .addParam("$name", $id.map(_.toString))"""
-    } ++ securityQueryLines(req.securitySchemes)
+    val pathExpr      = renderPathExpression(req.symbolicPath, pathParams)
+    val queryAddLines = queryParams.map(renderQueryAddLine) ++ securityQueryLines(req.securitySchemes)
 
     val headerLines = securityHeaderLines(req.securitySchemes) ++
       declaredHs.map { h =>
@@ -302,14 +297,43 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
     else s""".method(sttp.model.Method("$upper"), $uriChain)"""
   }
 
-  private def renderPathExpression(symbolicPath: String, pathParamNames: Seq[String]): String = {
+  private def renderPathExpression(symbolicPath: String, pathParams: Seq[BaklavaPathParamSerializable]): String = {
     val ParamSeg = """^\{(.+)\}$""".r
+    val byName   = pathParams.map(p => p.name -> p).toMap
     val segments = symbolicPath.stripPrefix("/").split("/").filter(_.nonEmpty).toSeq
     val parts    = segments.map {
-      case ParamSeg(name) if pathParamNames.contains(name) => "s\"$" + scalaSafeIdent(name) + "\""
-      case lit                                             => "\"" + lit + "\""
+      case ParamSeg(name) if byName.contains(name) => renderPathSegment(byName(name))
+      case lit                                     => "\"" + lit + "\""
     }
     s"""baseUri.addPath(${parts.mkString(", ")})"""
+  }
+
+  private def renderPathSegment(p: BaklavaPathParamSerializable): String = {
+    val id        = scalaSafeIdent(p.name)
+    val prefix    = p.style.prefix(p.name)
+    val separator = p.style.separator(p.name)
+    if (p.schema.`type` != SchemaType.ArrayType) "s\"" + prefix + "$" + id + "\""
+    else if (prefix.isEmpty) s"""$id.mkString("$separator")"""
+    else s"""$id.mkString("$prefix", "$separator", "")"""
+  }
+
+  private def renderQueryAddLine(p: BaklavaQueryParamSerializable): String = {
+    val name     = p.name
+    val id       = scalaSafeIdent(name)
+    val required = p.schema.required
+    if (p.schema.`type` != SchemaType.ArrayType)
+      if (required) s"""        .addParam("$name", $id.toString)"""
+      else s"""        .addParam("$name", $id.map(_.toString))"""
+    else
+      p.collectionStyle.delimiter match {
+        case None =>
+          val values = if (required) id else s"$id.toSeq.flatten"
+          s"""        .addParams($values.map(value => "$name" -> value.toString): _*)"""
+        case Some(delimiter) if required =>
+          s"""        .addParam("$name", if ($id.isEmpty) None else Some($id.map(_.toString).mkString("$delimiter")))"""
+        case Some(delimiter) =>
+          s"""        .addParam("$name", $id.filter(_.nonEmpty).map(_.map(_.toString).mkString("$delimiter")))"""
+      }
   }
 
   private def securityCredentialParams(schemes: Seq[BaklavaSecuritySchemaSerializable]): Seq[String] =

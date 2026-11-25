@@ -169,7 +169,8 @@ object BaklavaDslFormatterOpenAPIWorker {
             parameter.setName(queryParam.name)
             parameter.setIn("query")
             parameter.setRequired(queryParam.schema.required)
-            parameter.setExplode(true) // I guess this is default?
+            parameter.setStyle(parameterStyle(queryParam.collectionStyle.style))
+            parameter.setExplode(queryParam.collectionStyle.explode)
             parameter.setSchema(baklavaSchemaToOpenAPISchema(queryParam.schema))
             queryParam.description.foreach(parameter.setDescription)
             attachParameterExamples(parameter, collectQueryExamples(calls, queryParam.name))
@@ -185,6 +186,8 @@ object BaklavaDslFormatterOpenAPIWorker {
             parameter.setIn("path")
             // Path params must always be `required: true` per OAS 3.x.
             parameter.setRequired(true)
+            parameter.setStyle(parameterStyle(pathParam.style.style))
+            parameter.setExplode(pathParam.style.explode)
             parameter.setSchema(baklavaSchemaToOpenAPISchema(pathParam.schema))
             pathParam.description.foreach(parameter.setDescription)
             attachParameterExamples(parameter, collectPathExamples(calls, pathParam.name))
@@ -296,27 +299,38 @@ object BaklavaDslFormatterOpenAPIWorker {
     * `responseDescription` when present; calls without a description are included with an empty scenario name (which
     * `attachParameterExamples` later fills in with `Example <idx>`). Calls whose example is `None` (no captured value) are skipped.
     */
-  private def collectQueryExamples(calls: Seq[BaklavaSerializableCall], name: String): Seq[(String, String)] =
+  private def collectQueryExamples(calls: Seq[BaklavaSerializableCall], name: String): Seq[(String, CapturedExample)] =
     calls.flatMap { c =>
       val label    = c.request.responseDescription.getOrElse("")
-      val maybeVal = c.request.queryParametersSeq.find(_.name == name).flatMap(_.example)
+      val maybeVal = c.request.queryParametersSeq.find(_.name == name).flatMap(p => capturedExample(p.example, p.exampleValues))
       maybeVal.map(label -> _)
     }
 
-  private def collectPathExamples(calls: Seq[BaklavaSerializableCall], name: String): Seq[(String, String)] =
+  private def collectPathExamples(calls: Seq[BaklavaSerializableCall], name: String): Seq[(String, CapturedExample)] =
     calls.flatMap { c =>
       val label    = c.request.responseDescription.getOrElse("")
-      val maybeVal = c.request.pathParametersSeq.find(_.name == name).flatMap(_.example)
+      val maybeVal = c.request.pathParametersSeq.find(_.name == name).flatMap(p => capturedExample(p.example, p.exampleValues))
       maybeVal.map(label -> _)
     }
 
-  private def collectHeaderExamples(calls: Seq[BaklavaSerializableCall], name: String): Seq[(String, String)] =
+  private def collectHeaderExamples(calls: Seq[BaklavaSerializableCall], name: String): Seq[(String, CapturedExample)] =
     calls.flatMap { c =>
       val label    = c.request.responseDescription.getOrElse("")
       val lowered  = name.toLowerCase
       val maybeVal = c.request.headersSeq.find(_.name.toLowerCase == lowered).flatMap(_.example)
-      maybeVal.map(label -> _)
+      maybeVal.map(value => label -> Left(value))
     }
+
+  private type CapturedExample = Either[String, Seq[String]]
+
+  private def capturedExample(example: Option[String], exampleValues: Seq[String]): Option[CapturedExample] =
+    if (exampleValues.nonEmpty) Some(Right(exampleValues)) else example.map(Left(_))
+
+  private def parameterStyle(style: String): io.swagger.v3.oas.models.parameters.Parameter.StyleEnum =
+    io.swagger.v3.oas.models.parameters.Parameter.StyleEnum
+      .values()
+      .find(_.toString == style)
+      .getOrElse(throw new IllegalArgumentException(s"Unsupported OpenAPI parameter style: $style"))
 
   /** Attach example values to an OpenAPI `Parameter`. If all captured values are identical, use the singular `example`. If they differ,
     * emit a named `examples` map keyed by scenario name (with disambiguation for duplicate / missing labels). Nothing is emitted when no
@@ -324,12 +338,12 @@ object BaklavaDslFormatterOpenAPIWorker {
     */
   private def attachParameterExamples(
       parameter: io.swagger.v3.oas.models.parameters.Parameter,
-      examples: Seq[(String, String)]
+      examples: Seq[(String, CapturedExample)]
   ): Unit = {
     val distinctValues = examples.map(_._2).distinct
     if (distinctValues.isEmpty) () // nothing to attach
     else if (distinctValues.size == 1) {
-      val _ = parameter.example(coerceExample(distinctValues.head, parameter.getSchema))
+      val _ = parameter.example(coerceCapturedExample(distinctValues.head, parameter.getSchema))
     } else {
       val used = scala.collection.mutable.Set.empty[String]
       examples.zipWithIndex.foreach { case ((label, value), idx) =>
@@ -337,10 +351,19 @@ object BaklavaDslFormatterOpenAPIWorker {
         val finalKey = disambiguateKey(baseKey, used)
         val _        = parameter.addExample(
           finalKey,
-          new io.swagger.v3.oas.models.examples.Example().value(coerceExample(value, parameter.getSchema))
+          new io.swagger.v3.oas.models.examples.Example().value(coerceCapturedExample(value, parameter.getSchema))
         )
       }
     }
+  }
+
+  private def coerceCapturedExample(example: CapturedExample, schema: Schema[?]): Object = example match {
+    case Left(value)  => coerceExample(value, schema)
+    case Right(items) =>
+      val itemSchema = Option(schema).flatMap(s => Option(s.getItems)).orNull
+      val list       = new java.util.ArrayList[Object](items.size)
+      items.foreach(item => list.add(coerceExample(item, itemSchema)))
+      list
   }
 
   // application/json or an RFC 6839 +json suffix type (#129)

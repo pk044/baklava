@@ -232,6 +232,80 @@ class BaklavaTsFetchGeneratorSpec extends AnyFunSpec with Matchers {
     }
   }
 
+  describe("collection and styled parameters (#90)") {
+
+    val ids         = BaklavaSchemaSerializable(Schema.seqSchema(Schema.intSchema))
+    val optionalIds = BaklavaSchemaSerializable(Schema.optionSchema(Schema.seqSchema(Schema.intSchema)))
+    val id          = BaklavaSchemaSerializable(Schema.intSchema)
+
+    def withParams(
+        call: BaklavaSerializableCall,
+        pathParams: Seq[BaklavaPathParamSerializable] = Nil,
+        queryParams: Seq[BaklavaQueryParamSerializable] = Nil
+    ): BaklavaSerializableCall =
+      call.copy(request = call.request.copy(pathParametersSeq = pathParams, queryParametersSeq = queryParams))
+
+    it("serializes a collection query parameter the way its style puts it on the wire") {
+      val call = withParams(
+        getCall("/items", tag = Some("Items")),
+        queryParams = Seq(
+          BaklavaQueryParamSerializable("exploded", None, ids),
+          BaklavaQueryParamSerializable("comma", None, ids, collectionStyle = CollectionStyle.CommaSeparated),
+          BaklavaQueryParamSerializable("pipe", None, optionalIds, collectionStyle = CollectionStyle.PipeDelimited),
+          BaklavaQueryParamSerializable("space", None, ids, collectionStyle = CollectionStyle.SpaceDelimited)
+        )
+      )
+      val ts = generateAndRead("src/items/endpoints.ts", Seq(call))
+
+      ts should include("exploded: number[];")
+      ts should include("pipe?: number[];")
+      ts should include(
+        """if (params?.exploded !== undefined) for (const value of params.exploded) url.searchParams.append("exploded", String(value));"""
+      )
+      ts should include(
+        """if (params?.comma !== undefined && params.comma.length > 0) url.searchParams.set("comma", params.comma.map(String).join(","));"""
+      )
+      ts should include(
+        """if (params?.pipe !== undefined && params.pipe.length > 0) url.searchParams.set("pipe", params.pipe.map(String).join("|"));"""
+      )
+      ts should include(
+        """if (params?.space !== undefined && params.space.length > 0) url.searchParams.set("space", params.space.map(String).join(" "));"""
+      )
+    }
+
+    it("renders a single path value with its style's prefix") {
+      val call = withParams(
+        getCall("/a/{simple}/b/{label}/c/{matrix}", tag = Some("A")),
+        pathParams = Seq(
+          BaklavaPathParamSerializable("simple", None, id),
+          BaklavaPathParamSerializable("label", None, id, style = PathStyle.Label),
+          BaklavaPathParamSerializable("matrix", None, id, style = PathStyle.Matrix)
+        )
+      )
+      val ts = generateAndRead("src/a/endpoints.ts", Seq(call))
+
+      ts should include(
+        "/a/${encodeURIComponent(String(params.simple))}/b/.${encodeURIComponent(String(params.label))}/c/;matrix=${encodeURIComponent(String(params.matrix))}`"
+      )
+    }
+
+    it("joins a collection path value with its style's prefix and separator") {
+      val call = withParams(
+        getCall("/a/{simple}/b/{label}/c/{matrix}", tag = Some("A")),
+        pathParams = Seq(
+          BaklavaPathParamSerializable("simple", None, ids),
+          BaklavaPathParamSerializable("label", None, ids, style = PathStyle.LabelExploded),
+          BaklavaPathParamSerializable("matrix", None, ids, style = PathStyle.MatrixExploded)
+        )
+      )
+      val ts = generateAndRead("src/a/endpoints.ts", Seq(call))
+
+      ts should include("""/a/${params.simple.map((value) => encodeURIComponent(String(value))).join(",")}/b/""")
+      ts should include("""/b/.${params.label.map((value) => encodeURIComponent(String(value))).join(".")}/c/""")
+      ts should include("""/c/;matrix=${params.matrix.map((value) => encodeURIComponent(String(value))).join(";matrix=")}`""")
+    }
+  }
+
   describe("nullable (Option) fields in generated TypeScript (regression for #131)") {
 
     def widgetTypesTs(): String = {

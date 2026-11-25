@@ -304,6 +304,78 @@ class BaklavaSttpClientGeneratorSpec extends AnyFunSpec with Matchers {
     }
   }
 
+  describe("collection and styled parameters (#90)") {
+
+    val ids         = BaklavaSchemaSerializable(Schema.seqSchema(Schema.intSchema))
+    val optionalIds = BaklavaSchemaSerializable(Schema.optionSchema(Schema.seqSchema(Schema.intSchema)))
+    val id          = BaklavaSchemaSerializable(Schema.intSchema)
+
+    it("serializes a collection query parameter the way its style puts it on the wire") {
+      cleanSrc()
+      val call = getCall("/items", tag = Some("Items")).let(c =>
+        c.copy(request =
+          c.request.copy(queryParametersSeq =
+            Seq(
+              BaklavaQueryParamSerializable("exploded", None, ids),
+              BaklavaQueryParamSerializable("optionalExploded", None, optionalIds),
+              BaklavaQueryParamSerializable("comma", None, ids, collectionStyle = CollectionStyle.CommaSeparated),
+              BaklavaQueryParamSerializable("pipe", None, optionalIds, collectionStyle = CollectionStyle.PipeDelimited),
+              BaklavaQueryParamSerializable("space", None, ids, collectionStyle = CollectionStyle.SpaceDelimited)
+            )
+          )
+        )
+      )
+      val content = generateAndRead("src/main/scala/baklavaclient/items/ItemsEndpoints.scala", Seq(call))
+
+      content should include("exploded: Seq[Int]")
+      content should include("pipe: Option[Seq[Int]] = None")
+      content should include(""".addParams(exploded.map(value => "exploded" -> value.toString): _*)""")
+      content should include(""".addParams(optionalExploded.toSeq.flatten.map(value => "optionalExploded" -> value.toString): _*)""")
+      content should include(""".addParam("comma", if (comma.isEmpty) None else Some(comma.map(_.toString).mkString(",")))""")
+      content should include(""".addParam("pipe", pipe.filter(_.nonEmpty).map(_.map(_.toString).mkString("|")))""")
+      content should include(""".addParam("space", if (space.isEmpty) None else Some(space.map(_.toString).mkString(" ")))""")
+    }
+
+    it("renders a single path value with its style's prefix") {
+      cleanSrc()
+      val call = getCall("/a/{simple}/b/{label}/c/{matrix}", tag = Some("A")).let(c =>
+        c.copy(request =
+          c.request.copy(pathParametersSeq =
+            Seq(
+              BaklavaPathParamSerializable("simple", None, id),
+              BaklavaPathParamSerializable("label", None, id, style = PathStyle.Label),
+              BaklavaPathParamSerializable("matrix", None, id, style = PathStyle.Matrix)
+            )
+          )
+        )
+      )
+      val content = generateAndRead("src/main/scala/baklavaclient/a/AEndpoints.scala", Seq(call))
+
+      content should include("""baseUri.addPath("a", s"$simple", "b", s".$label", "c", s";matrix=$matrix")""")
+    }
+
+    it("joins a collection path value with its style's prefix and separator") {
+      cleanSrc()
+      val call = getCall("/a/{simple}/b/{label}/c/{matrix}", tag = Some("A")).let(c =>
+        c.copy(request =
+          c.request.copy(pathParametersSeq =
+            Seq(
+              BaklavaPathParamSerializable("simple", None, ids),
+              BaklavaPathParamSerializable("label", None, ids, style = PathStyle.LabelExploded),
+              BaklavaPathParamSerializable("matrix", None, ids, style = PathStyle.MatrixExploded)
+            )
+          )
+        )
+      )
+      val content = generateAndRead("src/main/scala/baklavaclient/a/AEndpoints.scala", Seq(call))
+
+      content should include("simple: Seq[Int]")
+      content should include(
+        """baseUri.addPath("a", simple.mkString(","), "b", label.mkString(".", ".", ""), "c", matrix.mkString(";matrix=", ";matrix=", ""))"""
+      )
+    }
+  }
+
   case class Variant(url: String, width: Int)
   case class ImageDto(id: String, variants: Map[String, Variant])
 

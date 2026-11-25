@@ -1,14 +1,76 @@
 package pl.iterators.baklava
 
-import java.net.URLEncoder
+import java.net.{URLDecoder, URLEncoder}
 import java.nio.charset.StandardCharsets
+import java.util.regex.Pattern
 
 trait ToPathParam[T] {
   def apply(t: T): String
+
+  def values(t: T): Seq[String] = Seq(apply(t))
 }
 
-case class PathParam[T](name: String, description: Option[String])(implicit val tsm: ToPathParam[T], val schema: Schema[T]) {
+sealed abstract class PathStyle(val style: String, val explode: Boolean) extends Product with Serializable {
+
+  def prefix(name: String): String
+
+  def separator(name: String): String
+
+  private[baklava] def serialize(name: String, values: Seq[String]): String = {
+    val encodedName = PathStyle.encode(name)
+    if (values.isEmpty) "" else prefix(encodedName) + values.map(PathStyle.encode).mkString(separator(encodedName))
+  }
+
+  private[baklava] def deserialize(name: String, segment: String, collection: Boolean): Seq[String] = {
+    val encodedName = PathStyle.encode(name)
+    val unprefixed  = segment.stripPrefix(prefix(encodedName))
+    val raw         =
+      if (!collection) Seq(unprefixed)
+      else if (segment.isEmpty) Seq.empty
+      else unprefixed.split(Pattern.quote(separator(encodedName)), -1).toSeq
+    raw.map(PathStyle.decode)
+  }
+}
+
+object PathStyle {
+  case object Simple extends PathStyle("simple", explode = false) {
+    def prefix(name: String): String    = ""
+    def separator(name: String): String = ","
+  }
+
+  case object Label extends PathStyle("label", explode = false) {
+    def prefix(name: String): String    = "."
+    def separator(name: String): String = ","
+  }
+
+  case object LabelExploded extends PathStyle("label", explode = true) {
+    def prefix(name: String): String    = "."
+    def separator(name: String): String = "."
+  }
+
+  case object Matrix extends PathStyle("matrix", explode = false) {
+    def prefix(name: String): String    = s";$name="
+    def separator(name: String): String = ","
+  }
+
+  case object MatrixExploded extends PathStyle("matrix", explode = true) {
+    def prefix(name: String): String    = s";$name="
+    def separator(name: String): String = s";$name="
+  }
+
+  val values: Seq[PathStyle] = Seq(Simple, Label, LabelExploded, Matrix, MatrixExploded)
+
+  private[baklava] def encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.toString)
+  private[baklava] def decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8.toString)
+}
+
+case class PathParam[T](name: String, description: Option[String], style: PathStyle = PathStyle.Simple)(implicit
+    val tsm: ToPathParam[T],
+    val schema: Schema[T]
+) {
   type Underlying = T
+
+  private[baklava] def resolve(uri: String, value: T): String = uri.replace(s"{$name}", style.serialize(name, tsm.values(value)))
 }
 
 trait ToPathParamSeq[T] {
@@ -24,8 +86,11 @@ trait ProvidePathParams[T, U] {
 }
 
 trait BaklavaPathParams {
-  def p[T](name: String, description: String = "")(implicit tsm: ToPathParam[T], schema: Schema[T]): PathParam[T] =
-    PathParam[T](name, if (description.trim.isEmpty) None else Some(description.trim))
+  def p[T](name: String, description: String = "", style: PathStyle = PathStyle.Simple)(implicit
+      tsm: ToPathParam[T],
+      schema: Schema[T]
+  ): PathParam[T] =
+    PathParam[T](name, if (description.trim.isEmpty) None else Some(description.trim), style)
 
   implicit val stringToPathParam: ToPathParam[String] = new ToPathParam[String] {
     override def apply(t: String): String = t
@@ -69,6 +134,31 @@ trait BaklavaPathParams {
 
   implicit val uuidToPathParam: ToPathParam[java.util.UUID] = new ToPathParam[java.util.UUID] {
     override def apply(t: java.util.UUID): String = t.toString
+  }
+
+  implicit def seqToPathParam[T](implicit tsm: ToPathParam[T]): ToPathParam[Seq[T]] = new ToPathParam[Seq[T]] {
+    override def apply(t: Seq[T]): String       = values(t).mkString(",")
+    override def values(t: Seq[T]): Seq[String] = t.flatMap(tsm.values)
+  }
+
+  implicit def listToPathParam[T](implicit tsm: ToPathParam[T]): ToPathParam[List[T]] = new ToPathParam[List[T]] {
+    override def apply(t: List[T]): String       = values(t).mkString(",")
+    override def values(t: List[T]): Seq[String] = t.flatMap(tsm.values)
+  }
+
+  implicit def vectorToPathParam[T](implicit tsm: ToPathParam[T]): ToPathParam[Vector[T]] = new ToPathParam[Vector[T]] {
+    override def apply(t: Vector[T]): String       = values(t).mkString(",")
+    override def values(t: Vector[T]): Seq[String] = t.flatMap(tsm.values)
+  }
+
+  implicit def setToPathParam[T](implicit tsm: ToPathParam[T]): ToPathParam[Set[T]] = new ToPathParam[Set[T]] {
+    override def apply(t: Set[T]): String       = values(t).mkString(",")
+    override def values(t: Set[T]): Seq[String] = t.toSeq.flatMap(tsm.values).sorted
+  }
+
+  implicit def arrayToPathParam[T](implicit tsm: ToPathParam[T]): ToPathParam[Array[T]] = new ToPathParam[Array[T]] {
+    override def apply(t: Array[T]): String       = values(t).mkString(",")
+    override def values(t: Array[T]): Seq[String] = t.toSeq.flatMap(tsm.values)
   }
 
   implicit val unitToPathParamSeq: ToPathParamSeq[Unit] = (_: Unit) => Seq.empty
@@ -452,7 +542,7 @@ trait BaklavaPathParams {
         pathParamsProvided: U,
         uri: String
     ): String =
-      uri.replace(s"{${pathParams.name}}", URLEncoder.encode(pathParams.tsm(pathParamsProvided), StandardCharsets.UTF_8.toString))
+      pathParams.resolve(uri, pathParamsProvided)
   }
 
   implicit def providePathParams2[T1, T2, U1 <: T1, U2 <: T2]: ProvidePathParams[(PathParam[T1], PathParam[T2]), (U1, U2)] =
@@ -464,8 +554,8 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2)       = pathParams
         val (provided1, provided2) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
+        val uri1                   = param1.resolve(uri, provided1)
+        param2.resolve(uri1, provided2)
       }
     }
 
@@ -479,9 +569,9 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3)          = pathParams
         val (provided1, provided2, provided3) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
+        val uri1                              = param1.resolve(uri, provided1)
+        val uri2                              = param2.resolve(uri1, provided2)
+        param3.resolve(uri2, provided3)
       }
     }
 
@@ -495,10 +585,10 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3, param4)             = pathParams
         val (provided1, provided2, provided3, provided4) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
+        val uri1                                         = param1.resolve(uri, provided1)
+        val uri2                                         = param2.resolve(uri1, provided2)
+        val uri3                                         = param3.resolve(uri2, provided3)
+        param4.resolve(uri3, provided4)
       }
     }
 
@@ -512,11 +602,11 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3, param4, param5)                = pathParams
         val (provided1, provided2, provided3, provided4, provided5) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4 = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
+        val uri1                                                    = param1.resolve(uri, provided1)
+        val uri2                                                    = param2.resolve(uri1, provided2)
+        val uri3                                                    = param3.resolve(uri2, provided3)
+        val uri4                                                    = param4.resolve(uri3, provided4)
+        param5.resolve(uri4, provided5)
       }
     }
 
@@ -535,12 +625,12 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3, param4, param5, param6)                   = pathParams
         val (provided1, provided2, provided3, provided4, provided5, provided6) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4 = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5 = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
+        val uri1                                                               = param1.resolve(uri, provided1)
+        val uri2                                                               = param2.resolve(uri1, provided2)
+        val uri3                                                               = param3.resolve(uri2, provided3)
+        val uri4                                                               = param4.resolve(uri3, provided4)
+        val uri5                                                               = param5.resolve(uri4, provided5)
+        param6.resolve(uri5, provided6)
       }
     }
 
@@ -560,13 +650,13 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3, param4, param5, param6, param7)                      = pathParams
         val (provided1, provided2, provided3, provided4, provided5, provided6, provided7) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4 = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5 = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6 = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
+        val uri1                                                                          = param1.resolve(uri, provided1)
+        val uri2                                                                          = param2.resolve(uri1, provided2)
+        val uri3                                                                          = param3.resolve(uri2, provided3)
+        val uri4                                                                          = param4.resolve(uri3, provided4)
+        val uri5                                                                          = param5.resolve(uri4, provided5)
+        val uri6                                                                          = param6.resolve(uri5, provided6)
+        param7.resolve(uri6, provided7)
       }
     }
 
@@ -611,14 +701,14 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3, param4, param5, param6, param7, param8)                         = pathParams
         val (provided1, provided2, provided3, provided4, provided5, provided6, provided7, provided8) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4 = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5 = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6 = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7 = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
+        val uri1                                                                                     = param1.resolve(uri, provided1)
+        val uri2                                                                                     = param2.resolve(uri1, provided2)
+        val uri3                                                                                     = param3.resolve(uri2, provided3)
+        val uri4                                                                                     = param4.resolve(uri3, provided4)
+        val uri5                                                                                     = param5.resolve(uri4, provided5)
+        val uri6                                                                                     = param6.resolve(uri5, provided6)
+        val uri7                                                                                     = param7.resolve(uri6, provided7)
+        param8.resolve(uri7, provided8)
       }
     }
 
@@ -686,15 +776,15 @@ trait BaklavaPathParams {
       ): String = {
         val (param1, param2, param3, param4, param5, param6, param7, param8, param9)                            = pathParams
         val (provided1, provided2, provided3, provided4, provided5, provided6, provided7, provided8, provided9) = pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4 = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5 = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6 = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7 = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8 = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
+        val uri1 = param1.resolve(uri, provided1)
+        val uri2 = param2.resolve(uri1, provided2)
+        val uri3 = param3.resolve(uri2, provided3)
+        val uri4 = param4.resolve(uri3, provided4)
+        val uri5 = param5.resolve(uri4, provided5)
+        val uri6 = param6.resolve(uri5, provided6)
+        val uri7 = param7.resolve(uri6, provided7)
+        val uri8 = param8.resolve(uri7, provided8)
+        param9.resolve(uri8, provided9)
       }
     }
 
@@ -768,16 +858,16 @@ trait BaklavaPathParams {
         val (param1, param2, param3, param4, param5, param6, param7, param8, param9, param10)                               = pathParams
         val (provided1, provided2, provided3, provided4, provided5, provided6, provided7, provided8, provided9, provided10) =
           pathParamsProvided
-        val uri1 = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2 = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3 = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4 = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5 = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6 = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7 = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8 = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9 = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
+        val uri1 = param1.resolve(uri, provided1)
+        val uri2 = param2.resolve(uri1, provided2)
+        val uri3 = param3.resolve(uri2, provided3)
+        val uri4 = param4.resolve(uri3, provided4)
+        val uri5 = param5.resolve(uri4, provided5)
+        val uri6 = param6.resolve(uri5, provided6)
+        val uri7 = param7.resolve(uri6, provided7)
+        val uri8 = param8.resolve(uri7, provided8)
+        val uri9 = param9.resolve(uri8, provided9)
+        param10.resolve(uri9, provided10)
       }
     }
 
@@ -856,17 +946,17 @@ trait BaklavaPathParams {
         val (param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11) = pathParams
         val (provided1, provided2, provided3, provided4, provided5, provided6, provided7, provided8, provided9, provided10, provided11) =
           pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        param11.resolve(uri10, provided11)
       }
     }
 
@@ -962,18 +1052,18 @@ trait BaklavaPathParams {
           provided11,
           provided12
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        param12.resolve(uri11, provided12)
       }
     }
 
@@ -1075,19 +1165,19 @@ trait BaklavaPathParams {
           provided12,
           provided13
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        param13.resolve(uri12, provided13)
       }
     }
 
@@ -1196,20 +1286,20 @@ trait BaklavaPathParams {
           provided13,
           provided14
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        param14.resolve(uri13, provided14)
       }
     }
 
@@ -1339,21 +1429,21 @@ trait BaklavaPathParams {
           provided14,
           provided15
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        param15.resolve(uri14, provided15)
       }
     }
 
@@ -1490,22 +1580,22 @@ trait BaklavaPathParams {
           provided15,
           provided16
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        param16.resolve(uri15, provided16)
       }
     }
 
@@ -1649,23 +1739,23 @@ trait BaklavaPathParams {
           provided16,
           provided17
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        val uri16 = uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
-        uri16.replace(s"{${param17.name}}", URLEncoder.encode(param17.tsm(provided17), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        val uri16 = param16.resolve(uri15, provided16)
+        param17.resolve(uri16, provided17)
       }
     }
 
@@ -1816,24 +1906,24 @@ trait BaklavaPathParams {
           provided17,
           provided18
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        val uri16 = uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
-        val uri17 = uri16.replace(s"{${param17.name}}", URLEncoder.encode(param17.tsm(provided17), StandardCharsets.UTF_8.toString))
-        uri17.replace(s"{${param18.name}}", URLEncoder.encode(param18.tsm(provided18), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        val uri16 = param16.resolve(uri15, provided16)
+        val uri17 = param17.resolve(uri16, provided17)
+        param18.resolve(uri17, provided18)
       }
     }
 
@@ -1991,25 +2081,25 @@ trait BaklavaPathParams {
           provided18,
           provided19
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        val uri16 = uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
-        val uri17 = uri16.replace(s"{${param17.name}}", URLEncoder.encode(param17.tsm(provided17), StandardCharsets.UTF_8.toString))
-        val uri18 = uri17.replace(s"{${param18.name}}", URLEncoder.encode(param18.tsm(provided18), StandardCharsets.UTF_8.toString))
-        uri18.replace(s"{${param19.name}}", URLEncoder.encode(param19.tsm(provided19), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        val uri16 = param16.resolve(uri15, provided16)
+        val uri17 = param17.resolve(uri16, provided17)
+        val uri18 = param18.resolve(uri17, provided18)
+        param19.resolve(uri18, provided19)
       }
     }
 
@@ -2174,26 +2264,26 @@ trait BaklavaPathParams {
           provided19,
           provided20
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        val uri16 = uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
-        val uri17 = uri16.replace(s"{${param17.name}}", URLEncoder.encode(param17.tsm(provided17), StandardCharsets.UTF_8.toString))
-        val uri18 = uri17.replace(s"{${param18.name}}", URLEncoder.encode(param18.tsm(provided18), StandardCharsets.UTF_8.toString))
-        val uri19 = uri18.replace(s"{${param19.name}}", URLEncoder.encode(param19.tsm(provided19), StandardCharsets.UTF_8.toString))
-        uri19.replace(s"{${param20.name}}", URLEncoder.encode(param20.tsm(provided20), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        val uri16 = param16.resolve(uri15, provided16)
+        val uri17 = param17.resolve(uri16, provided17)
+        val uri18 = param18.resolve(uri17, provided18)
+        val uri19 = param19.resolve(uri18, provided19)
+        param20.resolve(uri19, provided20)
       }
     }
 
@@ -2365,27 +2455,27 @@ trait BaklavaPathParams {
           provided20,
           provided21
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        val uri16 = uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
-        val uri17 = uri16.replace(s"{${param17.name}}", URLEncoder.encode(param17.tsm(provided17), StandardCharsets.UTF_8.toString))
-        val uri18 = uri17.replace(s"{${param18.name}}", URLEncoder.encode(param18.tsm(provided18), StandardCharsets.UTF_8.toString))
-        val uri19 = uri18.replace(s"{${param19.name}}", URLEncoder.encode(param19.tsm(provided19), StandardCharsets.UTF_8.toString))
-        val uri20 = uri19.replace(s"{${param20.name}}", URLEncoder.encode(param20.tsm(provided20), StandardCharsets.UTF_8.toString))
-        uri20.replace(s"{${param21.name}}", URLEncoder.encode(param21.tsm(provided21), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        val uri16 = param16.resolve(uri15, provided16)
+        val uri17 = param17.resolve(uri16, provided17)
+        val uri18 = param18.resolve(uri17, provided18)
+        val uri19 = param19.resolve(uri18, provided19)
+        val uri20 = param20.resolve(uri19, provided20)
+        param21.resolve(uri20, provided21)
       }
     }
 
@@ -2564,28 +2654,28 @@ trait BaklavaPathParams {
           provided21,
           provided22
         )         = pathParamsProvided
-        val uri1  = uri.replace(s"{${param1.name}}", URLEncoder.encode(param1.tsm(provided1), StandardCharsets.UTF_8.toString))
-        val uri2  = uri1.replace(s"{${param2.name}}", URLEncoder.encode(param2.tsm(provided2), StandardCharsets.UTF_8.toString))
-        val uri3  = uri2.replace(s"{${param3.name}}", URLEncoder.encode(param3.tsm(provided3), StandardCharsets.UTF_8.toString))
-        val uri4  = uri3.replace(s"{${param4.name}}", URLEncoder.encode(param4.tsm(provided4), StandardCharsets.UTF_8.toString))
-        val uri5  = uri4.replace(s"{${param5.name}}", URLEncoder.encode(param5.tsm(provided5), StandardCharsets.UTF_8.toString))
-        val uri6  = uri5.replace(s"{${param6.name}}", URLEncoder.encode(param6.tsm(provided6), StandardCharsets.UTF_8.toString))
-        val uri7  = uri6.replace(s"{${param7.name}}", URLEncoder.encode(param7.tsm(provided7), StandardCharsets.UTF_8.toString))
-        val uri8  = uri7.replace(s"{${param8.name}}", URLEncoder.encode(param8.tsm(provided8), StandardCharsets.UTF_8.toString))
-        val uri9  = uri8.replace(s"{${param9.name}}", URLEncoder.encode(param9.tsm(provided9), StandardCharsets.UTF_8.toString))
-        val uri10 = uri9.replace(s"{${param10.name}}", URLEncoder.encode(param10.tsm(provided10), StandardCharsets.UTF_8.toString))
-        val uri11 = uri10.replace(s"{${param11.name}}", URLEncoder.encode(param11.tsm(provided11), StandardCharsets.UTF_8.toString))
-        val uri12 = uri11.replace(s"{${param12.name}}", URLEncoder.encode(param12.tsm(provided12), StandardCharsets.UTF_8.toString))
-        val uri13 = uri12.replace(s"{${param13.name}}", URLEncoder.encode(param13.tsm(provided13), StandardCharsets.UTF_8.toString))
-        val uri14 = uri13.replace(s"{${param14.name}}", URLEncoder.encode(param14.tsm(provided14), StandardCharsets.UTF_8.toString))
-        val uri15 = uri14.replace(s"{${param15.name}}", URLEncoder.encode(param15.tsm(provided15), StandardCharsets.UTF_8.toString))
-        val uri16 = uri15.replace(s"{${param16.name}}", URLEncoder.encode(param16.tsm(provided16), StandardCharsets.UTF_8.toString))
-        val uri17 = uri16.replace(s"{${param17.name}}", URLEncoder.encode(param17.tsm(provided17), StandardCharsets.UTF_8.toString))
-        val uri18 = uri17.replace(s"{${param18.name}}", URLEncoder.encode(param18.tsm(provided18), StandardCharsets.UTF_8.toString))
-        val uri19 = uri18.replace(s"{${param19.name}}", URLEncoder.encode(param19.tsm(provided19), StandardCharsets.UTF_8.toString))
-        val uri20 = uri19.replace(s"{${param20.name}}", URLEncoder.encode(param20.tsm(provided20), StandardCharsets.UTF_8.toString))
-        val uri21 = uri20.replace(s"{${param21.name}}", URLEncoder.encode(param21.tsm(provided21), StandardCharsets.UTF_8.toString))
-        uri21.replace(s"{${param22.name}}", URLEncoder.encode(param22.tsm(provided22), StandardCharsets.UTF_8.toString))
+        val uri1  = param1.resolve(uri, provided1)
+        val uri2  = param2.resolve(uri1, provided2)
+        val uri3  = param3.resolve(uri2, provided3)
+        val uri4  = param4.resolve(uri3, provided4)
+        val uri5  = param5.resolve(uri4, provided5)
+        val uri6  = param6.resolve(uri5, provided6)
+        val uri7  = param7.resolve(uri6, provided7)
+        val uri8  = param8.resolve(uri7, provided8)
+        val uri9  = param9.resolve(uri8, provided9)
+        val uri10 = param10.resolve(uri9, provided10)
+        val uri11 = param11.resolve(uri10, provided11)
+        val uri12 = param12.resolve(uri11, provided12)
+        val uri13 = param13.resolve(uri12, provided13)
+        val uri14 = param14.resolve(uri13, provided14)
+        val uri15 = param15.resolve(uri14, provided15)
+        val uri16 = param16.resolve(uri15, provided16)
+        val uri17 = param17.resolve(uri16, provided17)
+        val uri18 = param18.resolve(uri17, provided18)
+        val uri19 = param19.resolve(uri18, provided19)
+        val uri20 = param20.resolve(uri19, provided20)
+        val uri21 = param21.resolve(uri20, provided21)
+        param22.resolve(uri21, provided22)
       }
     }
 }

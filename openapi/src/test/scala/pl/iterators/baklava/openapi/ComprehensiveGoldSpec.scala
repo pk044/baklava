@@ -27,6 +27,7 @@ import pl.iterators.baklava.tsrest.BaklavaDslFormatterTsRest
 import pl.iterators.baklava.{
   ApiKeyInHeader,
   BaklavaTestFrameworkDslInMemory,
+  CollectionStyle,
   EmptyBody,
   FilePart,
   FormOf,
@@ -377,17 +378,27 @@ class ComprehensiveGoldSpec
     supports(
       GET,
       pathParameters = p[Long]("projectId", "The project ID"),
+      queryParameters = (
+        q[Seq[String]]("label", "Only tasks carrying every one of these labels"),
+        q[Seq[Long]]("assigneeIds", "Only tasks assigned to one of these users", collectionStyle = CollectionStyle.CommaSeparated),
+        q[Option[Seq[String]]]("fields", "Task fields to return", collectionStyle = CollectionStyle.PipeDelimited)
+      ),
       securitySchemes = Seq(oauthScheme),
       description = "List all tasks in a project",
       summary = "List tasks",
       operationId = "listTasks",
       tags = Seq("Tasks")
     )(
-      onRequest(pathParameters = 42L, security = oauthAdmin("oauth.access.token"))
+      onRequest(
+        pathParameters = 42L,
+        queryParameters = (Seq("backend", "urgent"), Seq(7L, 9L), Some(Seq("id", "title"))),
+        security = oauthAdmin("oauth.access.token")
+      )
         .respondsWith[Seq[Task]](OK, description = "All tasks in the project")
         .assert { ctx =>
           nextResponse = jsonResponse(OK, Seq(task1, task2).asJson.noSpaces)
           ctx.performRequest(routes)
+          lastRequest.get().uri.rawQueryString shouldBe Some("label=backend&label=urgent&assigneeIds=7,9&fields=id%7Ctitle")
         }
     ),
     supports(

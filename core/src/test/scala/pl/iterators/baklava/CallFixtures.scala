@@ -4,6 +4,40 @@ import sttp.model.StatusCode
 
 object CallFixtures {
 
+  def requestContextAt(
+      symbolicPath: String,
+      path: String,
+      pathParameters: Seq[PathParam[?]] = Nil,
+      queryParameters: Seq[QueryParam[?]] = Nil
+  ): BaklavaRequestContext[Unit, Unit, Unit, Unit, Unit, Unit, Unit] =
+    BaklavaRequestContext[Unit, Unit, Unit, Unit, Unit, Unit, Unit](
+      symbolicPath = symbolicPath,
+      path = path,
+      pathDescription = None,
+      pathSummary = None,
+      method = None,
+      operationDescription = None,
+      operationSummary = None,
+      operationId = None,
+      operationTags = Seq.empty,
+      securitySchemes = Seq.empty,
+      body = None,
+      bodySchema = None,
+      headers = Seq.empty,
+      headersDefinition = (),
+      headersProvided = (),
+      headersSeq = Seq.empty,
+      security = AppliedSecurity(NoopSecurity, Map.empty),
+      pathParameters = (),
+      pathParametersProvided = (),
+      pathParametersSeq = pathParameters,
+      queryParameters = (),
+      queryParametersProvided = (),
+      queryParametersSeq = queryParameters,
+      responseDescription = None,
+      responseHeaders = Seq.empty
+    )
+
   def callAt(symbolicPath: String, path: String, tags: Seq[String] = Nil): BaklavaSerializableCall = BaklavaSerializableCall(
     BaklavaRequestContextSerializable(
       symbolicPath = symbolicPath,

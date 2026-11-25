@@ -4,8 +4,54 @@ trait ToQueryParam[T] {
   def apply(t: T): Seq[String]
 }
 
-case class QueryParam[T](name: String, description: Option[String])(implicit val tsm: ToQueryParam[T], val schema: Schema[T]) {
+sealed abstract class CollectionStyle(
+    val style: String,
+    val explode: Boolean,
+    val delimiter: Option[String],
+    wireDelimiter: Option[String]
+) extends Product
+    with Serializable {
+
+  private[baklava] def serialize(name: String, values: Seq[String]): Seq[String] = {
+    val key     = CollectionStyle.encode(name)
+    val encoded = values.map(CollectionStyle.encode)
+    wireDelimiter match {
+      case None                       => encoded.map(value => s"$key=$value")
+      case Some(_) if encoded.isEmpty => Seq.empty
+      case Some(separator)            => Seq(s"$key=${encoded.mkString(separator)}")
+    }
+  }
+
+  private[baklava] def deserialize(rawValues: Seq[String]): Seq[String] =
+    wireDelimiter
+      .fold(rawValues)(separator => rawValues.flatMap(_.split(java.util.regex.Pattern.quote(separator), -1).toSeq))
+      .map(CollectionStyle.decode)
+}
+
+object CollectionStyle {
+  case object Exploded       extends CollectionStyle("form", explode = true, delimiter = None, wireDelimiter = None)
+  case object CommaSeparated extends CollectionStyle("form", explode = false, delimiter = Some(","), wireDelimiter = Some(","))
+  case object PipeDelimited  extends CollectionStyle("pipeDelimited", explode = false, delimiter = Some("|"), wireDelimiter = Some("%7C"))
+  case object SpaceDelimited extends CollectionStyle("spaceDelimited", explode = false, delimiter = Some(" "), wireDelimiter = Some("%20"))
+
+  val values: Seq[CollectionStyle] = Seq(Exploded, CommaSeparated, PipeDelimited, SpaceDelimited)
+
+  private[baklava] def encode(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
+  private[baklava] def decode(value: String): String = java.net.URLDecoder.decode(value, "UTF-8")
+}
+
+case class QueryParam[T](name: String, description: Option[String], collectionStyle: CollectionStyle = CollectionStyle.Exploded)(implicit
+    val tsm: ToQueryParam[T],
+    val schema: Schema[T]
+) {
   type Underlying = T
+
+  require(
+    collectionStyle == CollectionStyle.Exploded || schema.`type` == SchemaType.ArrayType,
+    s"Query parameter '$name' declares collectionStyle $collectionStyle, which applies only to collection parameters (Seq, List, Vector, Set, Array)"
+  )
+
+  private[baklava] def serialize(value: T): Seq[String] = collectionStyle.serialize(name, tsm(value))
 }
 
 trait ToQueryParamSeq[T] {
@@ -21,8 +67,11 @@ trait ProvideQueryParams[T, U] {
 }
 
 trait BaklavaQueryParams {
-  def q[T](name: String, description: String = "")(implicit tsm: ToQueryParam[T], schema: Schema[T]): QueryParam[T] =
-    QueryParam[T](name, if (description.trim.isEmpty) None else Some(description.trim))
+  def q[T](name: String, description: String = "", collectionStyle: CollectionStyle = CollectionStyle.Exploded)(implicit
+      tsm: ToQueryParam[T],
+      schema: Schema[T]
+  ): QueryParam[T] =
+    QueryParam[T](name, if (description.trim.isEmpty) None else Some(description.trim), collectionStyle)
 
   implicit val stringToQueryParam: ToQueryParam[String] = new ToQueryParam[String] {
     override def apply(t: String): Seq[String] = Seq(t)
@@ -496,7 +545,7 @@ trait BaklavaQueryParams {
         queryParameters: QueryParam[T],
         queryParametersProvided: U,
         uri: String
-    ): String = addQueryParametersToUri(uri, Map(queryParameters.name -> queryParameters.tsm(queryParametersProvided)))
+    ): String = addSerializedQueryParametersToUri(uri, Seq(queryParameters.serialize(queryParametersProvided)))
   }
 
   implicit def provideQueryParams2[T1, T2, U1 <: T1, U2 <: T2]: ProvideQueryParams[(QueryParam[T1], QueryParam[T2]), (U1, U2)] =
@@ -507,11 +556,11 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b)
           )
         )
       }
@@ -526,12 +575,12 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c)
           )
         )
       }
@@ -546,13 +595,13 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c),
-            queryParameters._4.name -> queryParameters._4.tsm(d)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d)
           )
         )
       }
@@ -567,14 +616,14 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c),
-            queryParameters._4.name -> queryParameters._4.tsm(d),
-            queryParameters._5.name -> queryParameters._5.tsm(e)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e)
           )
         )
       }
@@ -594,15 +643,15 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c),
-            queryParameters._4.name -> queryParameters._4.tsm(d),
-            queryParameters._5.name -> queryParameters._5.tsm(e),
-            queryParameters._6.name -> queryParameters._6.tsm(f)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f)
           )
         )
       }
@@ -631,16 +680,16 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c),
-            queryParameters._4.name -> queryParameters._4.tsm(d),
-            queryParameters._5.name -> queryParameters._5.tsm(e),
-            queryParameters._6.name -> queryParameters._6.tsm(f),
-            queryParameters._7.name -> queryParameters._7.tsm(g)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g)
           )
         )
       }
@@ -686,17 +735,17 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c),
-            queryParameters._4.name -> queryParameters._4.tsm(d),
-            queryParameters._5.name -> queryParameters._5.tsm(e),
-            queryParameters._6.name -> queryParameters._6.tsm(f),
-            queryParameters._7.name -> queryParameters._7.tsm(g),
-            queryParameters._8.name -> queryParameters._8.tsm(h)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h)
           )
         )
       }
@@ -765,18 +814,18 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name -> queryParameters._1.tsm(a),
-            queryParameters._2.name -> queryParameters._2.tsm(b),
-            queryParameters._3.name -> queryParameters._3.tsm(c),
-            queryParameters._4.name -> queryParameters._4.tsm(d),
-            queryParameters._5.name -> queryParameters._5.tsm(e),
-            queryParameters._6.name -> queryParameters._6.tsm(f),
-            queryParameters._7.name -> queryParameters._7.tsm(g),
-            queryParameters._8.name -> queryParameters._8.tsm(h),
-            queryParameters._9.name -> queryParameters._9.tsm(i)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i)
           )
         )
       }
@@ -850,19 +899,19 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j)
           )
         )
       }
@@ -941,20 +990,20 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k)
           )
         )
       }
@@ -1038,21 +1087,21 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l)
           )
         )
       }
@@ -1141,22 +1190,22 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m)
           )
         )
       }
@@ -1250,23 +1299,23 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n)
           )
         )
       }
@@ -1365,24 +1414,24 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o)
           )
         )
       }
@@ -1486,25 +1535,25 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p)
           )
         )
       }
@@ -1613,26 +1662,26 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p),
-            queryParameters._17.name -> queryParameters._17.tsm(q)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p),
+            queryParameters._17.serialize(q)
           )
         )
       }
@@ -1746,27 +1795,27 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p),
-            queryParameters._17.name -> queryParameters._17.tsm(q),
-            queryParameters._18.name -> queryParameters._18.tsm(r)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p),
+            queryParameters._17.serialize(q),
+            queryParameters._18.serialize(r)
           )
         )
       }
@@ -1885,28 +1934,28 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p),
-            queryParameters._17.name -> queryParameters._17.tsm(q),
-            queryParameters._18.name -> queryParameters._18.tsm(r),
-            queryParameters._19.name -> queryParameters._19.tsm(s)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p),
+            queryParameters._17.serialize(q),
+            queryParameters._18.serialize(r),
+            queryParameters._19.serialize(s)
           )
         )
       }
@@ -2030,29 +2079,29 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p),
-            queryParameters._17.name -> queryParameters._17.tsm(q),
-            queryParameters._18.name -> queryParameters._18.tsm(r),
-            queryParameters._19.name -> queryParameters._19.tsm(s),
-            queryParameters._20.name -> queryParameters._20.tsm(t)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p),
+            queryParameters._17.serialize(q),
+            queryParameters._18.serialize(r),
+            queryParameters._19.serialize(s),
+            queryParameters._20.serialize(t)
           )
         )
       }
@@ -2181,30 +2230,30 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p),
-            queryParameters._17.name -> queryParameters._17.tsm(q),
-            queryParameters._18.name -> queryParameters._18.tsm(r),
-            queryParameters._19.name -> queryParameters._19.tsm(s),
-            queryParameters._20.name -> queryParameters._20.tsm(t),
-            queryParameters._21.name -> queryParameters._21.tsm(u)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p),
+            queryParameters._17.serialize(q),
+            queryParameters._18.serialize(r),
+            queryParameters._19.serialize(s),
+            queryParameters._20.serialize(t),
+            queryParameters._21.serialize(u)
           )
         )
       }
@@ -2338,57 +2387,55 @@ trait BaklavaQueryParams {
           uri: String
       ): String = {
         val (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v) = queryParametersProvided
-        addQueryParametersToUri(
+        addSerializedQueryParametersToUri(
           uri,
-          Map(
-            queryParameters._1.name  -> queryParameters._1.tsm(a),
-            queryParameters._2.name  -> queryParameters._2.tsm(b),
-            queryParameters._3.name  -> queryParameters._3.tsm(c),
-            queryParameters._4.name  -> queryParameters._4.tsm(d),
-            queryParameters._5.name  -> queryParameters._5.tsm(e),
-            queryParameters._6.name  -> queryParameters._6.tsm(f),
-            queryParameters._7.name  -> queryParameters._7.tsm(g),
-            queryParameters._8.name  -> queryParameters._8.tsm(h),
-            queryParameters._9.name  -> queryParameters._9.tsm(i),
-            queryParameters._10.name -> queryParameters._10.tsm(j),
-            queryParameters._11.name -> queryParameters._11.tsm(k),
-            queryParameters._12.name -> queryParameters._12.tsm(l),
-            queryParameters._13.name -> queryParameters._13.tsm(m),
-            queryParameters._14.name -> queryParameters._14.tsm(n),
-            queryParameters._15.name -> queryParameters._15.tsm(o),
-            queryParameters._16.name -> queryParameters._16.tsm(p),
-            queryParameters._17.name -> queryParameters._17.tsm(q),
-            queryParameters._18.name -> queryParameters._18.tsm(r),
-            queryParameters._19.name -> queryParameters._19.tsm(s),
-            queryParameters._20.name -> queryParameters._20.tsm(t),
-            queryParameters._21.name -> queryParameters._21.tsm(u),
-            queryParameters._22.name -> queryParameters._22.tsm(v)
+          Seq(
+            queryParameters._1.serialize(a),
+            queryParameters._2.serialize(b),
+            queryParameters._3.serialize(c),
+            queryParameters._4.serialize(d),
+            queryParameters._5.serialize(e),
+            queryParameters._6.serialize(f),
+            queryParameters._7.serialize(g),
+            queryParameters._8.serialize(h),
+            queryParameters._9.serialize(i),
+            queryParameters._10.serialize(j),
+            queryParameters._11.serialize(k),
+            queryParameters._12.serialize(l),
+            queryParameters._13.serialize(m),
+            queryParameters._14.serialize(n),
+            queryParameters._15.serialize(o),
+            queryParameters._16.serialize(p),
+            queryParameters._17.serialize(q),
+            queryParameters._18.serialize(r),
+            queryParameters._19.serialize(s),
+            queryParameters._20.serialize(t),
+            queryParameters._21.serialize(u),
+            queryParameters._22.serialize(v)
           )
         )
       }
     }
 
-  def addQueryParametersToUri(uri: String, queryParameters: Map[String, Seq[String]]): String = {
-    if (queryParameters.isEmpty) {
+  def addQueryParametersToUri(uri: String, queryParameters: Map[String, Seq[String]]): String =
+    addSerializedQueryParametersToUri(
+      uri,
+      queryParameters.toSeq.map { case (name, values) => CollectionStyle.Exploded.serialize(name, values) }
+    )
+
+  private def addSerializedQueryParametersToUri(uri: String, serializedParameters: Seq[Seq[String]]): String = {
+    val pairs = serializedParameters.flatten
+    if (pairs.isEmpty) {
       uri
     } else {
       val (baseUri, fragment) = uri.splitAt(uri.indexOf("#") match {
-        case -1  => uri.length // No fragment
+        case -1  => uri.length
         case idx => idx
       })
 
       val baseWithQuery = if (baseUri.contains("?")) s"$baseUri&" else s"$baseUri?"
-      val queryString   = queryParameters
-        .flatMap { case (param, values) =>
-          values.map(value => s"${encode(param)}=${encode(value)}")
-        }
-        .mkString("&")
 
-      baseWithQuery + queryString + fragment
+      baseWithQuery + pairs.mkString("&") + fragment
     }
-  }
-
-  private def encode(value: String): String = {
-    java.net.URLEncoder.encode(value, "UTF-8")
   }
 }

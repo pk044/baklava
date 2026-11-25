@@ -446,7 +446,7 @@
             "header" : [
             ],
             "url" : {
-              "raw" : "{{baseUrl}}/projects/:projectId/tasks",
+              "raw" : "{{baseUrl}}/projects/:projectId/tasks?assigneeIds=7%2C9&fields=id%7Ctitle&label=backend&label=urgent",
               "host" : [
                 "{{baseUrl}}"
               ],
@@ -454,6 +454,28 @@
                 "projects",
                 ":projectId",
                 "tasks"
+              ],
+              "query" : [
+                {
+                  "key" : "assigneeIds",
+                  "value" : "7,9",
+                  "description" : "Only tasks assigned to one of these users"
+                },
+                {
+                  "key" : "fields",
+                  "value" : "id|title",
+                  "description" : "Task fields to return"
+                },
+                {
+                  "key" : "label",
+                  "value" : "backend",
+                  "description" : "Only tasks carrying every one of these labels"
+                },
+                {
+                  "key" : "label",
+                  "value" : "urgent",
+                  "description" : "Only tasks carrying every one of these labels"
+                }
               ],
               "variable" : [
                 {

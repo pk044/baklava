@@ -44,6 +44,7 @@ export const projects = initContract().router({
         method: 'GET',
         path: '/projects/:projectId/tasks',
         pathParams: z.object({projectId: z.number().int()}),
+        query: z.object({label: z.array(z.string()), assigneeIds: z.array(z.number().int()), fields: z.array(z.string()).nullish()}),
         responses: {
           200: z.array(taskSchema)
         }

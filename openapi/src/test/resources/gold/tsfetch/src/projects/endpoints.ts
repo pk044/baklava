@@ -74,8 +74,14 @@ export async function patchProject(client: BaklavaClient, params: {
 /** List tasks — List all tasks in a project */
 export async function listTasks(client: BaklavaClient, params: {
   projectId: number;
+  label: string[];
+  assigneeIds: number[];
+  fields?: string[];
 }): Promise<Task[]> {
   const url = new URL(`${client.baseUrl}/projects/${encodeURIComponent(String(params.projectId))}/tasks`);
+  if (params?.label !== undefined) for (const value of params.label) url.searchParams.append("label", String(value));
+  if (params?.assigneeIds !== undefined && params.assigneeIds.length > 0) url.searchParams.set("assigneeIds", params.assigneeIds.map(String).join(","));
+  if (params?.fields !== undefined && params.fields.length > 0) url.searchParams.set("fields", params.fields.map(String).join("|"));
   let __ret!: Task[];
   const res = await client.fetch(url.toString(), {
     method: "GET",

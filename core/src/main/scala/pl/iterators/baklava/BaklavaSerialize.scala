@@ -186,27 +186,35 @@ case class BaklavaPathParamSerializable(
     name: String,
     description: Option[String],
     schema: BaklavaSchemaSerializable,
-    example: Option[String] = None
+    example: Option[String] = None,
+    style: PathStyle = PathStyle.Simple,
+    exampleValues: Seq[String] = Seq.empty
 ) extends Serializable
 
 object BaklavaPathParamSerializable {
   def apply[T](h: PathParam[T]): BaklavaPathParamSerializable =
-    BaklavaPathParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema))
+    BaklavaPathParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), style = h.style)
   def apply[T](h: PathParam[T], example: Option[String]): BaklavaPathParamSerializable =
-    BaklavaPathParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), example)
+    BaklavaPathParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), example, h.style)
+  def apply[T](h: PathParam[T], example: Option[String], exampleValues: Seq[String]): BaklavaPathParamSerializable =
+    BaklavaPathParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), example, h.style, exampleValues)
 }
 
 case class BaklavaQueryParamSerializable(
     name: String,
     description: Option[String],
     schema: BaklavaSchemaSerializable,
-    example: Option[String] = None
+    example: Option[String] = None,
+    collectionStyle: CollectionStyle = CollectionStyle.Exploded,
+    exampleValues: Seq[String] = Seq.empty
 ) extends Serializable
 object BaklavaQueryParamSerializable {
   def apply[T](h: QueryParam[T]): BaklavaQueryParamSerializable =
-    BaklavaQueryParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema))
+    BaklavaQueryParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), collectionStyle = h.collectionStyle)
   def apply[T](h: QueryParam[T], example: Option[String]): BaklavaQueryParamSerializable =
-    BaklavaQueryParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), example)
+    BaklavaQueryParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), example, h.collectionStyle)
+  def apply[T](h: QueryParam[T], example: Option[String], exampleValues: Seq[String]): BaklavaQueryParamSerializable =
+    BaklavaQueryParamSerializable(h.name, h.description, BaklavaSchemaSerializable(h.schema), example, h.collectionStyle, exampleValues)
 }
 
 // A single part of a `multipart/form-data` request body, captured so generators can name the form
@@ -240,8 +248,8 @@ object BaklavaRequestContextSerializable {
       c: BaklavaRequestContext[_, _, _, _, _, _, _],
       bodyString: String
   ): BaklavaRequestContextSerializable = {
-    val pathParamValues  = extractPathParamValues(c.symbolicPath, c.path)
-    val queryParamValues = extractQueryParamValues(c.path)
+    val pathSegments   = extractPathSegments(c.symbolicPath, c.path)
+    val rawQueryValues = extractRawQueryValues(c.path)
 
     BaklavaRequestContextSerializable(
       symbolicPath = c.symbolicPath,
@@ -260,10 +268,14 @@ object BaklavaRequestContextSerializable {
         BaklavaHeaderSerializable(h, caseInsensitiveHeaderValue(c.headers, h.name))
       },
       pathParametersSeq = c.pathParametersSeq.map { p =>
-        BaklavaPathParamSerializable(p, pathParamValues.get(p.name))
+        val collection = p.schema.`type` == SchemaType.ArrayType
+        val values     = pathSegments.get(p.name).map(p.style.deserialize(p.name, _, collection))
+        BaklavaPathParamSerializable(p, values.map(_.mkString(",")), values.filter(_ => collection).getOrElse(Seq.empty))
       },
       queryParametersSeq = c.queryParametersSeq.map { p =>
-        BaklavaQueryParamSerializable(p, queryParamValues.get(p.name))
+        val collection = p.schema.`type` == SchemaType.ArrayType
+        val values     = rawQueryValues.get(p.name).map(p.collectionStyle.deserialize)
+        BaklavaQueryParamSerializable(p, values.map(_.mkString(",")), values.filter(_ => collection).getOrElse(Seq.empty))
       },
       responseDescription = c.responseDescription,
       responseHeaders = c.responseHeaders.map(h => BaklavaHeaderSerializable(h)),
@@ -284,11 +296,7 @@ object BaklavaRequestContextSerializable {
   private def stripFragment(resolvedPath: String): String =
     resolvedPath.split('#').headOption.getOrElse(resolvedPath)
 
-  /** Extract `{name} -> actualValue` from a resolved URL by matching against its symbolic template. Both inputs are split on `/`; the
-    * resolved path is stripped of its fragment and query string first. A segment `{name}` in the template maps to whatever appears in the
-    * same position in the resolved path. URL-decoding is applied to the extracted values so `%20` etc. round-trip.
-    */
-  private def extractPathParamValues(symbolicPath: String, resolvedPath: String): Map[String, String] = {
+  private def extractPathSegments(symbolicPath: String, resolvedPath: String): Map[String, String] = {
     val pathOnly      = stripFragmentAndQuery(resolvedPath)
     val templateParts = symbolicPath.split('/')
     val resolvedParts = pathOnly.split('/')
@@ -297,18 +305,12 @@ object BaklavaRequestContextSerializable {
       templateParts
         .zip(resolvedParts)
         .collect {
-          case (t, r) if t.startsWith("{") && t.endsWith("}") =>
-            val name = t.substring(1, t.length - 1)
-            name -> java.net.URLDecoder.decode(r, "UTF-8")
+          case (t, r) if t.startsWith("{") && t.endsWith("}") => t.substring(1, t.length - 1) -> r
         }
         .toMap
   }
 
-  /** Parse a URL query string into `name -> value` pairs. The resolved path is stripped of its `#fragment` first so a trailing fragment
-    * doesn't leak into the last query value. If a key appears multiple times (e.g. `?tag=a&tag=b`), the values are joined with commas —
-    * matching OpenAPI's default explode=true representation reasonably well for a single example value.
-    */
-  private def extractQueryParamValues(resolvedPath: String): Map[String, String] = {
+  private def extractRawQueryValues(resolvedPath: String): Map[String, Seq[String]] = {
     val queryPart = stripFragment(resolvedPath).split('?').drop(1).headOption.getOrElse("")
     if (queryPart.isEmpty) Map.empty
     else
@@ -319,12 +321,9 @@ object BaklavaRequestContextSerializable {
         .map { kv =>
           val eq = kv.indexOf('=')
           if (eq < 0) java.net.URLDecoder.decode(kv, "UTF-8")           -> ""
-          else java.net.URLDecoder.decode(kv.substring(0, eq), "UTF-8") -> java.net.URLDecoder.decode(kv.substring(eq + 1), "UTF-8")
+          else java.net.URLDecoder.decode(kv.substring(0, eq), "UTF-8") -> kv.substring(eq + 1)
         }
-        .groupBy(_._1)
-        .view
-        .mapValues(_.map(_._2).mkString(","))
-        .toMap
+        .groupMap(_._1)(_._2)
   }
 
   private def caseInsensitiveHeaderValue(headers: Seq[SttpHeader], name: String): Option[String] = {

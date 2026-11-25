@@ -162,6 +162,54 @@ class BaklavaPostmanCollectionSpec extends AnyFunSpec with Matchers {
       raw should not include " "
     }
 
+    it("repeats the key of an exploded collection and joins a delimited one (#90)") {
+      val ids  = BaklavaSchemaSerializable(Schema.seqSchema(Schema.intSchema))
+      val call = simpleGetCall().copy(
+        request = simpleGetCall().request.copy(
+          queryParametersSeq = Seq(
+            BaklavaQueryParamSerializable("a", None, ids, Some("1,2"), exampleValues = Seq("1", "2")),
+            BaklavaQueryParamSerializable("b", None, ids, Some("1,2"), CollectionStyle.CommaSeparated, Seq("1", "2")),
+            BaklavaQueryParamSerializable("c", None, ids, Some("1,2"), CollectionStyle.PipeDelimited, Seq("1", "2")),
+            BaklavaQueryParamSerializable("d", None, ids, Some("1,2"), CollectionStyle.SpaceDelimited, Seq("1", "2"))
+          )
+        )
+      )
+      val url = BaklavaPostmanCollection.build("API", Seq(call)).hcursor.downField("item").downArray.downField("request").downField("url")
+
+      url.downField("raw").as[String].toOption.get shouldBe "{{baseUrl}}/users?a=1&a=2&b=1%2C2&c=1%7C2&d=1+2"
+      val entries = url.downField("query").values.get.toList.map { entry =>
+        entry.hcursor.downField("key").as[String].toOption.get -> entry.hcursor.downField("value").as[String].toOption.get
+      }
+      entries shouldBe List("a" -> "1", "a" -> "2", "b" -> "1,2", "c" -> "1|2", "d" -> "1 2")
+    }
+
+    it("fills a path variable with the value its style puts on the wire (#90)") {
+      val ids    = BaklavaSchemaSerializable(Schema.seqSchema(Schema.intSchema))
+      val styled = call(
+        method = "GET",
+        path = "/a/{simple}/b/{label}/c/{matrix}",
+        pathParams = Seq(
+          BaklavaPathParamSerializable("simple", None, ids, Some("3,4"), exampleValues = Seq("3", "4")),
+          BaklavaPathParamSerializable("label", None, stringSchema, Some("5"), PathStyle.Label),
+          BaklavaPathParamSerializable("matrix", None, ids, Some("3,4"), PathStyle.MatrixExploded, Seq("3", "4"))
+        )
+      )
+      val variables = BaklavaPostmanCollection
+        .build("API", Seq(styled))
+        .hcursor
+        .downField("item")
+        .downArray
+        .downField("request")
+        .downField("url")
+        .downField("variable")
+        .values
+        .get
+        .toList
+        .map(v => v.hcursor.downField("key").as[String].toOption.get -> v.hcursor.downField("value").as[String].toOption.get)
+
+      variables shouldBe List("simple" -> "3,4", "label" -> ".5", "matrix" -> ";matrix=3;matrix=4")
+    }
+
     it("normalizes content-type (case + parameters) when inferring body language") {
       val call = simpleGetCall().copy(
         request = simpleGetCall().request.copy(bodyString = """{"x":1}"""),

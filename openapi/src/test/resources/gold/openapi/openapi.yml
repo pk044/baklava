@@ -53,6 +53,8 @@ paths:
         in: path
         description: Logger name
         required: true
+        style: simple
+        explode: false
         schema:
           type: string
         example: ROOT
@@ -273,6 +275,7 @@ paths:
         in: query
         description: Filter by lifecycle state
         required: false
+        style: form
         explode: true
         schema:
           type: string
@@ -474,6 +477,8 @@ paths:
         in: path
         description: The project ID
         required: true
+        style: simple
+        explode: false
         schema:
           type: integer
           format: int64
@@ -568,10 +573,54 @@ paths:
       description: List all tasks in a project
       operationId: listTasks
       parameters:
+      - name: assigneeIds
+        in: query
+        description: Only tasks assigned to one of these users
+        required: true
+        style: form
+        explode: false
+        schema:
+          type: array
+          items:
+            type: integer
+            format: int64
+        example:
+        - 7
+        - 9
+      - name: fields
+        in: query
+        description: Task fields to return
+        required: false
+        style: pipeDelimited
+        explode: false
+        schema:
+          type: array
+          nullable: true
+          items:
+            type: string
+          default: null
+        example:
+        - id
+        - title
+      - name: label
+        in: query
+        description: Only tasks carrying every one of these labels
+        required: true
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+        example:
+        - backend
+        - urgent
       - name: projectId
         in: path
         description: The project ID
         required: true
+        style: simple
+        explode: false
         schema:
           type: integer
           format: int64
@@ -638,6 +687,8 @@ paths:
         in: path
         description: The project ID
         required: true
+        style: simple
+        explode: false
         schema:
           type: integer
           format: int64
@@ -736,6 +787,7 @@ paths:
         in: query
         description: Items per page (max 100)
         required: false
+        style: form
         explode: true
         schema:
           type: integer
@@ -747,6 +799,7 @@ paths:
         in: query
         description: Page number (1-indexed)
         required: false
+        style: form
         explode: true
         schema:
           type: integer
@@ -758,6 +811,7 @@ paths:
         in: query
         description: Filter by role
         required: false
+        style: form
         explode: true
         schema:
           type: string
@@ -857,6 +911,8 @@ paths:
         in: path
         description: The user's UUID
         required: true
+        style: simple
+        explode: false
         schema:
           type: string
           format: uuid
@@ -940,6 +996,8 @@ paths:
         in: path
         description: The user's UUID
         required: true
+        style: simple
+        explode: false
         schema:
           type: string
           format: uuid
@@ -1016,6 +1074,8 @@ paths:
         in: path
         description: The user's UUID
         required: true
+        style: simple
+        explode: false
         schema:
           type: string
           format: uuid
@@ -1039,6 +1099,8 @@ paths:
         in: path
         description: The user's UUID
         required: true
+        style: simple
+        explode: false
         schema:
           type: string
           format: uuid

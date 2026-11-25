@@ -40,7 +40,8 @@
 <div class="card"><div class="card-header">Overview</div><div class="card-body"><dl class="meta-grid"><dt>Summary</dt><dd>List tasks</dd><dt>Description</dt><dd>List all tasks in a project</dd><dt>Operation ID</dt><dd><code>listTasks</code></dd><dt>Tags</dt><dd><span class="tag">Tasks</span></dd></dl></div></div>
 <div class="card"><div class="card-header">Security</div><div class="card-body"><p>oauth2 <span class="tag">oauth2</span></p></div></div>
 <div class="card"><div class="card-header">Path Parameters</div><div class="card-body"><dl class="meta-grid"><dt>projectId <span class="required">*</span></dt><dd><code>Long</code> = <code>42</code></dd></dl></div></div>
-<div class="card"><div class="card-header"><span class="status-badge status-2xx">200</span> Response</div><div class="card-body"><p>All tasks in the project</p><h4>Curl</h4><div class="curl-block"><pre>curl -X GET '$BASE_URL/projects/42/tasks' \
+<div class="card"><div class="card-header">Query Parameters</div><div class="card-body"><dl class="meta-grid"><dt>label[] <span class="required">*</span></dt><dd><code>Seq[String][]</code> = <code>backend,urgent</code></dd><dt>assigneeIds[] <span class="required">*</span></dt><dd><code>Seq[Long][]</code> = <code>7,9</code></dd><dt>fields[]</dt><dd><code>Seq[String][]</code> = <code>id,title</code></dd></dl></div></div>
+<div class="card"><div class="card-header"><span class="status-badge status-2xx">200</span> Response</div><div class="card-body"><p>All tasks in the project</p><h4>Curl</h4><div class="curl-block"><pre>curl -X GET '$BASE_URL/projects/42/tasks?label=backend&amp;label=urgent&amp;assigneeIds=7,9&amp;fields=id%7Ctitle' \
   -H 'Authorization: Bearer &lt;OAUTH_TOKEN&gt;'</pre><button class="copy-btn" type="button">Copy</button></div><h4>Response body</h4><pre>[
   {
     "id" : 101,
