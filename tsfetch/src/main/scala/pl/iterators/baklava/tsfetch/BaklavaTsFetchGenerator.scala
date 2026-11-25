@@ -324,7 +324,11 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
 
   private def collectInterfaces(calls: Seq[BaklavaSerializableCall]): Map[String, String] = {
     val collected                                      = scala.collection.mutable.LinkedHashMap.empty[String, String]
-    def visit(schema: BaklavaSchemaSerializable): Unit = schema.`type` match {
+    def visit(schema: BaklavaSchemaSerializable): Unit = {
+      schema.oneOf.foreach(visit)
+      visitNode(schema)
+    }
+    def visitNode(schema: BaklavaSchemaSerializable): Unit = schema.`type` match {
       case SchemaType.ObjectType if isNamedInterface(schema) =>
         if (!collected.contains(schema.className)) collected(schema.className) = renderInterfaceBody(schema)
         schema.properties.values.foreach(visit)
@@ -348,7 +352,11 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
 
   private def collectDirectRefs(calls: Seq[BaklavaSerializableCall]): Map[String, Set[String]] = {
     val byClassName = scala.collection.mutable.Map.empty[String, Set[String]].withDefaultValue(Set.empty)
-    def collectFromSchema(schema: BaklavaSchemaSerializable): Unit = schema.`type` match {
+    def collectFromSchema(schema: BaklavaSchemaSerializable): Unit = {
+      schema.oneOf.foreach(collectFromSchema)
+      collectFromNode(schema)
+    }
+    def collectFromNode(schema: BaklavaSchemaSerializable): Unit = schema.`type` match {
       case SchemaType.ObjectType if isNamedInterface(schema) =>
         val refs = (schema.properties.values ++ schema.additionalPropertiesSchema).flatMap(directReferencesIn).toSet
         byClassName.update(schema.className, byClassName(schema.className) ++ refs)
@@ -374,7 +382,10 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
     * reference to them by name); anonymous object types get inlined, so we recurse through their properties to surface any named classes
     * they transitively embed.
     */
-  private def directReferencesIn(schema: BaklavaSchemaSerializable): Set[String] = schema.`type` match {
+  private def directReferencesIn(schema: BaklavaSchemaSerializable): Set[String] =
+    schema.ref.toSet ++ schema.oneOf.flatMap(directReferencesIn) ++ directReferencesInNode(schema)
+
+  private def directReferencesInNode(schema: BaklavaSchemaSerializable): Set[String] = schema.`type` match {
     case SchemaType.ObjectType if isNamedInterface(schema) => Set(schema.className)
     case SchemaType.ObjectType => (schema.properties.values ++ schema.additionalPropertiesSchema).flatMap(directReferencesIn).toSet
     case SchemaType.ArrayType  => schema.items.toSet.flatMap(directReferencesIn)
@@ -407,7 +418,11 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
 
   private def referencedClassesInCall(c: BaklavaSerializableCall): Set[String] = {
     val acc                                       = scala.collection.mutable.Set.empty[String]
-    def visit(s: BaklavaSchemaSerializable): Unit = s.`type` match {
+    def visit(s: BaklavaSchemaSerializable): Unit = {
+      s.oneOf.foreach(visit)
+      visitNode(s)
+    }
+    def visitNode(s: BaklavaSchemaSerializable): Unit = s.`type` match {
       case SchemaType.ObjectType if isNamedInterface(s) =>
         if (acc.add(s.className)) {
           s.properties.values.foreach(visit)
@@ -480,6 +495,7 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
   private def isNamedInterface(schema: BaklavaSchemaSerializable): Boolean =
     schema.`type` == SchemaType.ObjectType &&
       schema.properties.nonEmpty &&
+      schema.className.nonEmpty &&
       !schema.className.contains("[") &&
       !Set("FormData", "UrlForm", "Multipart").contains(schema.className)
 
@@ -495,7 +511,25 @@ private[tsfetch] class BaklavaTsFetchGenerator(calls: Seq[BaklavaSerializableCal
   private def nullUnion(schema: BaklavaSchemaSerializable): String =
     if (schema.nullable) " | null" else ""
 
-  private def tsType(schema: BaklavaSchemaSerializable): String = schema.`type` match {
+  private def tsType(schema: BaklavaSchemaSerializable): String =
+    schema.ref match {
+      case Some(target)                  => tsSafeIdent(target)
+      case None if schema.oneOf.nonEmpty => tsUnion(schema)
+      case None                          => tsNodeType(schema)
+    }
+
+  private def tsUnion(schema: BaklavaSchemaSerializable): String = {
+    val alternatives = schema.discriminator match {
+      case Some(d) =>
+        schema.oneOf.zip(d.values).map { case (alternative, tag) =>
+          s"""({ ${tsFieldKey(d.propertyName)}: "${tag.replace("\\", "\\\\").replace("\"", "\\\"")}" } & ${tsType(alternative)})"""
+        }
+      case None => schema.oneOf.map(alternative => tsType(alternative) + nullUnion(alternative))
+    }
+    alternatives.distinct.mkString(" | ")
+  }
+
+  private def tsNodeType(schema: BaklavaSchemaSerializable): String = schema.`type` match {
     case SchemaType.NullType    => "null"
     case SchemaType.BooleanType => "boolean"
     case SchemaType.IntegerType => "number"

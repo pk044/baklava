@@ -65,7 +65,14 @@ class BaklavaDslFormatterOrpc extends BaklavaDslFormatter {
 
     if (commonNames.nonEmpty) {
       val commonRefs = refs.filter { case (_, name) => commonNames(name) }
-      writeTo(schemasTsPath, TsSchemaRefs.schemasFileContent(commonRefs, rendererWith(refs, _ => ()).zodDefinition))
+      writeTo(
+        schemasTsPath,
+        TsSchemaRefs.schemasFileContent(
+          commonRefs,
+          rendererWith(refs, _ => ()).zodDefinition,
+          explicitType = rendererWith(refs, _ => ()).explicitType
+        )
+      )
     }
 
     rendered.foreach { case (module, body, usedRefs) =>
@@ -124,15 +131,23 @@ class BaklavaDslFormatterOrpc extends BaklavaDslFormatter {
   private def rendererWith(
       refs: Map[BaklavaSchemaSerializable, String],
       record: String => Unit
-  ): TsZodRenderer =
+  ): TsZodRenderer = {
+    val classRefs = TsSchemaRefs.classRefs(refs)
     new TsZodRenderer(
       TsZodDialect.orpc,
       schema =>
         refs.get(schema).map { name =>
           record(name)
           name
-        }
+        },
+      className =>
+        classRefs.get(className).map { name =>
+          record(name)
+          name
+        },
+      classRefs.values.toSet
     )
+  }
 
   // --- Contract emission ---------------------------------------------------------------------
 
@@ -163,8 +178,13 @@ class BaklavaDslFormatterOrpc extends BaklavaDslFormatter {
       val importLines    =
         if (commonImported.isEmpty) Seq.empty
         else Seq(s"import { ${commonImported.mkString(", ")} } from \"$schemasFrom\";")
-      val localPath     = (module.fileSegments.dropRight(1) :+ localBase).mkString("/") + ".ts"
-      val content       = TsSchemaRefs.schemasFileContent(localRefs, rendererWith(refs, _ => ()).zodDefinition, importLines)
+      val localPath = (module.fileSegments.dropRight(1) :+ localBase).mkString("/") + ".ts"
+      val content   = TsSchemaRefs.schemasFileContent(
+        localRefs,
+        rendererWith(refs, _ => ()).zodDefinition,
+        importLines,
+        rendererWith(refs, _ => ()).explicitType
+      )
       val fullLocalPath = s"$sourcesDirName/$localPath"
       new File(fullLocalPath).getParentFile.mkdirs()
       writeTo(fullLocalPath, content)

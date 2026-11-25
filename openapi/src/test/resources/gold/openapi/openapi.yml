@@ -181,6 +181,37 @@ paths:
                     details: null
       security:
       - basicAuth: []
+  /categories:
+    summary: Categories
+    description: Product categories
+    get:
+      tags:
+      - Catalog
+      summary: List categories
+      description: The category tree
+      operationId: listCategories
+      responses:
+        "200":
+          description: Top-level categories with their subcategories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Category"
+              examples:
+                Top-level categories with their subcategories:
+                  value:
+                  - id: 1
+                    name: Books
+                    children:
+                    - id: 2
+                      name: Fiction
+                      children: []
+                    - id: 3
+                      name: Science
+                      children: []
+      security: []
   /health:
     summary: Health
     description: Liveness probe
@@ -257,6 +288,109 @@ paths:
                     email: alice@example.com
                     name: Alice
                     role: admin
+      security:
+      - bearerAuth: []
+  /payments:
+    summary: Payments
+    description: Order payments
+    post:
+      tags:
+      - Payments
+      summary: Pay for an order
+      description: "Pay for an order with a card, a bank transfer or cash"
+      operationId: createPayment
+      requestBody:
+        content:
+          application/json:
+            schema:
+              required:
+              - method
+              - orderId
+              type: object
+              properties:
+                orderId:
+                  type: integer
+                  format: int64
+                method:
+                  discriminator:
+                    propertyName: type
+                    mapping:
+                      BankTransfer: "#/components/schemas/BankTransfer"
+                      Card: "#/components/schemas/Card"
+                      Cash: "#/components/schemas/Cash"
+                  oneOf:
+                  - $ref: "#/components/schemas/BankTransfer"
+                  - $ref: "#/components/schemas/Card"
+                  - $ref: "#/components/schemas/Cash"
+                  x-class: PaymentMethod
+                note:
+                  type: string
+                  nullable: true
+                  default: null
+              x-class: PaymentRequest
+            examples:
+              Card payment accepted:
+                value:
+                  orderId: 1001
+                  method:
+                    type: Card
+                    last4: "4242"
+                    brand: visa
+                  note: Leave at the door
+              Cash payment recorded:
+                value:
+                  orderId: 1002
+                  method:
+                    type: Cash
+                  note: null
+      responses:
+        "201":
+          description: Card payment accepted / Cash payment recorded
+          content:
+            application/json:
+              schema:
+                required:
+                - method
+                - orderId
+                - reference
+                type: object
+                properties:
+                  orderId:
+                    type: integer
+                    format: int64
+                  method:
+                    discriminator:
+                      propertyName: type
+                      mapping:
+                        BankTransfer: "#/components/schemas/BankTransfer"
+                        Card: "#/components/schemas/Card"
+                        Cash: "#/components/schemas/Cash"
+                    oneOf:
+                    - $ref: "#/components/schemas/BankTransfer"
+                    - $ref: "#/components/schemas/Card"
+                    - $ref: "#/components/schemas/Cash"
+                    x-class: PaymentMethod
+                  reference:
+                    oneOf:
+                    - type: string
+                    - type: integer
+                      format: int64
+                x-class: PaymentReceipt
+              examples:
+                Card payment accepted:
+                  value:
+                    orderId: 1001
+                    method:
+                      type: Card
+                      last4: "4242"
+                      brand: visa
+                    reference: 98765
+                Cash payment recorded:
+                  value:
+                    orderId: 1002
+                    method:
+                      type: Cash
+                    reference: CASH-1002
       security:
       - bearerAuth: []
   /projects:
@@ -1168,6 +1302,66 @@ paths:
       security:
       - apiKey: []
 components:
+  schemas:
+    BankTransfer:
+      required:
+      - iban
+      - reference
+      - type
+      type: object
+      properties:
+        iban:
+          type: string
+        reference:
+          type: string
+        type:
+          type: string
+          enum:
+          - BankTransfer
+      x-class: BankTransfer
+    Card:
+      required:
+      - brand
+      - last4
+      - type
+      type: object
+      properties:
+        last4:
+          type: string
+        brand:
+          type: string
+        type:
+          type: string
+          enum:
+          - Card
+      x-class: Card
+    Cash:
+      required:
+      - type
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+          - Cash
+      x-class: Cash
+    Category:
+      required:
+      - children
+      - id
+      - name
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/Category"
+      x-class: Category
   securitySchemes:
     basicAuth:
       type: http

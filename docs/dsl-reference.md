@@ -692,10 +692,12 @@ Baklava uses a [`Schema[T]`](https://github.com/theiterators/baklava/blob/v2.4.0
 - Primitive types (`String`, `Int`, `Long`, `Double`, `Boolean`, `UUID`, `BigDecimal`, etc.)
 - Collections (`Seq`, `List`, `Vector`, `Set`, `Array`, `Map`)
 - `Option` types
+- `Either[A, B]` (documented untagged, as `oneOf` of both sides; see [Either](#either))
 - `Array[Byte]` (mapped to binary format in OpenAPI)
-- Case classes and case objects (derived as objects, on both Scala 2.13 and Scala 3)
+- Case classes and case objects (derived as objects, on both Scala 2.13 and Scala 3), including recursive ones
+- Value classes (documented as the value they wrap)
 
-Sealed traits and enums are not derived: how they go over the wire depends on your codecs, so define their `Schema` yourself. With [kebs](https://github.com/theiterators/kebs), mix `KebsBaklavaEnumsSchema` from `kebs-baklava` into your specs; it covers every type with a kebs `EnumLike` instance in scope (on Scala 3, plain enums get one from `KebsEnum` in `kebs-enum`). By hand, a string enum looks like this:
+Sealed traits and enums are not derived automatically: how they go over the wire depends on your codecs. For a sealed trait or enum whose subtypes carry data, derive its schema with [`Schema.derivedSum`](#sum-types), naming the encoding your codecs use. For a string enum, use [kebs](https://github.com/theiterators/kebs): mix `KebsBaklavaEnumsSchema` from `kebs-baklava` into your specs; it covers every type with a kebs `EnumLike` instance in scope (on Scala 3, plain enums get one from `KebsEnum` in `kebs-enum`). By hand, a string enum looks like this:
 
 ```scala
 implicit val colorSchema: Schema[Color] = new Schema[Color] {
@@ -736,6 +738,55 @@ On Scala 3 the same can live on the type itself:
 final case class User(name: String, address: Address) derives Schema
 ```
 
+### Sum Types
+
+`Schema.derivedSum` describes a sealed trait or a Scala 3 enum whose cases are case classes or case objects as a `oneOf` of its subtypes. You pass the encoding your codecs use, since a schema that disagrees with the wire format is worse than none:
+
+```scala
+sealed trait Payment
+object Payment {
+  final case class Card(last4: String)    extends Payment
+  final case class Transfer(iban: String) extends Payment
+  case object Cash                        extends Payment
+
+  implicit val schema: Schema[Payment] = Schema.derivedSum[Payment](SumEncoding.Discriminator("type"))
+}
+```
+
+| Encoding | Wire format for `Card("1234")` | Typical codec |
+|---|---|---|
+| `SumEncoding.Discriminator("type")` | `{"type": "Card", "last4": "1234"}` | jsoniter-scala's default, circe-generic-extras / circe `Configuration.withDiscriminator` |
+| `SumEncoding.WrapperObject` | `{"Card": {"last4": "1234"}}` | circe-generic's default |
+| `SumEncoding.Untagged` | `{"last4": "1234"}` | hand-written encoders that just pick the subtype's encoder |
+
+Subtypes are listed alphabetically. The tag of each subtype (the discriminator value, or the wrapper key) is its class name passed through `transformConstructorName` on the derivation object (see [Naming Strategies](#naming-strategies)). Put the instance in the companion object, as above, so every derived case class that contains the type finds it.
+
+A case object is an object with no properties, so `Cash` is documented as `{"type": "Cash"}` under the discriminator encoding. If your codecs write the cases of an all-case-object sealed trait as plain strings, it is a string enum: use kebs or a hand-written enum schema instead.
+
+### Recursive Types
+
+Case classes that refer to themselves, directly (`Category(children: List[Category])`) or through other types, derive like any other case class. Generators render the back reference as a reference to the named type: a `$ref` into `components/schemas` in OpenAPI, `z.lazy(...)` in the Zod formats, and the type's own name in the TypeScript and Scala clients. Recursion through a sum type works the same way:
+
+```scala
+sealed trait Expr
+final case class Lit(value: Int)              extends Expr
+final case class Add(left: Expr, right: Expr) extends Expr
+
+implicit val exprSchema: Schema[Expr] = Schema.derivedSum[Expr](SumEncoding.Discriminator("op"))
+```
+
+### Value Classes
+
+A case class that extends `AnyVal` is documented as the value it wraps, matching codecs that encode it unwrapped (circe's `deriveUnwrapped*`, jsoniter-scala's default): `case class UserId(value: Long) extends AnyVal` is an `integer` with format `int64`. If your codecs write it as an object, define its schema with `Schema.derived` on a regular case class instead.
+
+### Either
+
+`Either[A, B]` has an instance that documents it untagged, as `oneOf` the two sides, which matches an encoder such as `_.fold(_.asJson, _.asJson)`. For circe's `Encoder.encodeEither("Left", "Right")` style, where each side is wrapped in an object, use `Schema.eitherWrappedSchema`:
+
+```scala
+implicit val resultSchema: Schema[Either[Problem, Done]] = Schema.eitherWrappedSchema[Problem, Done]("Left", "Right")
+```
+
 ### Custom Schemas
 
 You can customize derived schemas:
@@ -766,6 +817,17 @@ implicit val userSchema: Schema[User] = MySchemas.derived
 ```
 
 The transform applies to the whole derived schema tree — nested case classes, collection items and map values included. Class names (used for `x-class` and schema references) are not transformed.
+
+`transformConstructorName` does the same for the tags of [sum types](#sum-types) derived through that object, for codecs that rename constructors (e.g. circe's `Configuration.withSnakeCaseConstructorNames`):
+
+```scala
+object MySchemas extends SchemaDerivation with SchemaDefaults {
+  override def transformMemberName(name: String): String      = SchemaNameTransform.snakeCase(name)
+  override def transformConstructorName(name: String): String = SchemaNameTransform.snakeCase(name)
+}
+
+implicit val paymentSchema: Schema[Payment] = MySchemas.derivedSum[Payment](SumEncoding.Discriminator("type"))
+```
 
 `SchemaNameTransform` ships with `snakeCase`, `screamingSnakeCase` and `kebabCase`, but any `String => String` works as a transform — the hook is a plain method, so custom conventions (acronym tables, legacy field maps) need no extra machinery.
 

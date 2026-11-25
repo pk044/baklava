@@ -404,16 +404,65 @@ class BaklavaDslFormatterSimple extends BaklavaDslFormatter {
       .getOrElse(if (str.length > maxRawFallbackChars) str.take(maxRawFallbackChars) + "\n... [truncated]" else str)
 
   private def baklavaSchemaToJsonSchemaV7(baklavaSchema: BaklavaSchemaSerializable): String = {
-    val jsonSchema = toJsonSchemaV7(baklavaSchema, true)
+    val jsonSchema = toJsonSchemaV7(baklavaSchema)
     val printer    = Printer.spaces2
     printer.print(jsonSchema)
   }
 
-  private def toJsonSchemaV7(baklavaSchema: BaklavaSchemaSerializable, root: Boolean = false): Json = {
+  private def toJsonSchemaV7(baklavaSchema: BaklavaSchemaSerializable): Json = {
+    val defs        = definitionNodes(baklavaSchema, refTargets(baklavaSchema)).distinctBy(_.className).sortBy(_.className)
+    val definitions =
+      if (defs.isEmpty) Nil
+      else
+        List("definitions" -> Json.obj(defs.map(d => d.className -> nodeToJsonSchemaV7(d.copy(required = true, nullable = false))): _*))
+    val node = nodeToJsonSchemaV7(baklavaSchema).asObject.map(_.toList).getOrElse(Nil)
+    Json.fromFields(("$schema" -> Json.fromString("http://json-schema.org/draft-07/schema#")) :: node ++ definitions)
+  }
+
+  private def refTargets(schema: BaklavaSchemaSerializable): Set[String] =
+    (schema.ref.toSeq ++ children(schema).flatMap(refTargets)).toSet
+
+  private def children(schema: BaklavaSchemaSerializable): Seq[BaklavaSchemaSerializable] =
+    schema.properties.values.toSeq ++ schema.items ++ schema.additionalPropertiesSchema ++ schema.oneOf
+
+  private def definitionNodes(schema: BaklavaSchemaSerializable, targets: Set[String]): Seq[BaklavaSchemaSerializable] = {
+    val self = if (schema.ref.isEmpty && targets.contains(schema.className)) Seq(schema) else Seq.empty
+    self ++ children(schema).flatMap(definitionNodes(_, targets))
+  }
+
+  private def nodeToJsonSchemaV7(baklavaSchema: BaklavaSchemaSerializable): Json =
+    baklavaSchema.ref match {
+      case Some(target) =>
+        Json.obj("$ref" -> Json.fromString(s"#/definitions/$target"), "description" -> baklavaSchema.description.asJson).deepDropNullValues
+      case None if baklavaSchema.oneOf.nonEmpty =>
+        val alternatives = baklavaSchema.discriminator match {
+          case Some(d) =>
+            baklavaSchema.oneOf.zip(d.values).map { case (alternative, tag) =>
+              val tagSchema = Json.obj(
+                "type"       -> Json.fromString("object"),
+                "properties" -> Json.obj(d.propertyName -> Json.obj("const" -> Json.fromString(tag))),
+                "required"   -> Json.arr(Json.fromString(d.propertyName))
+              )
+              Json.obj("allOf" -> Json.arr(nodeToJsonSchemaV7(alternative), tagSchema))
+            }
+          case None => baklavaSchema.oneOf.map(nodeToJsonSchemaV7)
+        }
+        Json
+          .obj(
+            "title"       -> (if (baklavaSchema.className.nonEmpty) Json.fromString(baklavaSchema.className) else Json.Null),
+            "description" -> baklavaSchema.description.asJson,
+            "oneOf"       -> Json.arr(alternatives: _*)
+          )
+          .deepDropNullValues
+      case None => plainNodeToJsonSchemaV7(baklavaSchema)
+    }
+
+  private def plainNodeToJsonSchemaV7(baklavaSchema: BaklavaSchemaSerializable): Json = {
     Json
       .obj(
-        "$schema"     -> (if (root) Json.fromString("http://json-schema.org/draft-07/schema#") else Json.Null),
-        "title"       -> (if (baklavaSchema.`type` == SchemaType.ObjectType) Json.fromString(baklavaSchema.className) else Json.Null),
+        "title" -> (if (baklavaSchema.`type` == SchemaType.ObjectType && baklavaSchema.className.nonEmpty)
+                      Json.fromString(baklavaSchema.className)
+                    else Json.Null),
         "type"        -> baklavaSchema.`type`.asJson,
         "format"      -> baklavaSchema.format.asJson,
         "description" -> baklavaSchema.description.asJson,
@@ -421,7 +470,7 @@ class BaklavaDslFormatterSimple extends BaklavaDslFormatter {
         "default"    -> baklavaSchema.default.getOrElse(Json.Null),
         "enum"       -> baklavaSchema.`enum`.map(_.toList.asJson).getOrElse(Json.Null),
         "properties" -> (if (baklavaSchema.`type` == SchemaType.ObjectType)
-                           baklavaSchema.properties.view.mapValues(j => toJsonSchemaV7(j)).toMap.asJson
+                           baklavaSchema.properties.view.mapValues(j => nodeToJsonSchemaV7(j)).toMap.asJson
                          else Json.Null),
         "required" -> (if (baklavaSchema.`type` == SchemaType.ObjectType)
                          Json.arr(
@@ -437,10 +486,10 @@ class BaklavaDslFormatterSimple extends BaklavaDslFormatter {
           if (baklavaSchema.`type` != SchemaType.ObjectType) Json.Null
           else
             baklavaSchema.additionalPropertiesSchema
-              .map(j => toJsonSchemaV7(j))
+              .map(j => nodeToJsonSchemaV7(j))
               .getOrElse(Json.fromBoolean(baklavaSchema.additionalProperties))
         ),
-        "items" -> baklavaSchema.items.map(j => toJsonSchemaV7(j)).getOrElse(Json.Null)
+        "items" -> baklavaSchema.items.map(j => nodeToJsonSchemaV7(j)).getOrElse(Json.Null)
       )
       .deepDropNullValues
   }

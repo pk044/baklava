@@ -4,6 +4,7 @@ import com.github.pjfanning.pekkohttpcirce.FailFastCirceSupport
 import enumeratum.EnumEntry.Lowercase
 import enumeratum.{Enum, EnumEntry}
 import io.circe.syntax.*
+import io.circe.{Decoder, DecodingFailure, Encoder, HCursor, Json}
 import org.apache.pekko.actor.ActorSystem
 import org.apache.pekko.http.scaladsl.marshalling.{PredefinedToEntityMarshallers, ToEntityMarshaller}
 import org.apache.pekko.http.scaladsl.model.HttpMethods.*
@@ -39,6 +40,7 @@ import pl.iterators.baklava.{
   Schema,
   SchemaType,
   SecurityScheme,
+  SumEncoding,
   TextPart,
   ToQueryParam
 }
@@ -459,6 +461,55 @@ class ComprehensiveGoldSpec
     )
   )
 
+  path("/payments", description = "Order payments", summary = "Payments")(
+    supports(
+      POST,
+      securitySchemes = Seq(bearerScheme),
+      description = "Pay for an order with a card, a bank transfer or cash",
+      summary = "Pay for an order",
+      operationId = "createPayment",
+      tags = Seq("Payments")
+    )(
+      onRequest(
+        body = PaymentRequest(OrderId(1001L), PaymentMethod.Card("4242", "visa"), Some("Leave at the door")),
+        security = bearerAuth("jwt.token.here")
+      ).respondsWith[PaymentReceipt](Created, description = "Card payment accepted")
+        .assert { ctx =>
+          nextResponse =
+            jsonResponse(Created, PaymentReceipt(OrderId(1001L), PaymentMethod.Card("4242", "visa"), Right(98765L)).asJson.noSpaces)
+          ctx.performRequest(routes)
+        },
+      onRequest(
+        body = PaymentRequest(OrderId(1002L), PaymentMethod.Cash, None),
+        security = bearerAuth("jwt.token.here")
+      ).respondsWith[PaymentReceipt](Created, description = "Cash payment recorded")
+        .assert { ctx =>
+          nextResponse = jsonResponse(Created, PaymentReceipt(OrderId(1002L), PaymentMethod.Cash, Left("CASH-1002")).asJson.noSpaces)
+          ctx.performRequest(routes)
+        }
+    )
+  )
+
+  path("/categories", description = "Product categories", summary = "Categories")(
+    supports(
+      GET,
+      description = "The category tree",
+      summary = "List categories",
+      operationId = "listCategories",
+      tags = Seq("Catalog")
+    )(
+      onRequest()
+        .respondsWith[Seq[Category]](OK, description = "Top-level categories with their subcategories")
+        .assert { ctx =>
+          nextResponse = jsonResponse(
+            OK,
+            Seq(Category(1L, "Books", Seq(Category(2L, "Fiction", Nil), Category(3L, "Science", Nil)))).asJson.noSpaces
+          )
+          ctx.performRequest(routes)
+        }
+    )
+  )
+
   // An admin namespace: two named sub-resources under one non-version prefix, HTTP Basic
   // protected — exercises the folder-per-area split for non-version namespaces and captures a
   // basic-auth security scheme.
@@ -773,4 +824,68 @@ object ComprehensiveGoldSpec {
 
   case class PhotoVariant(url: String, width: Int, height: Int, format: String)
   case class PhotoUpload(id: UUID, variants: Map[String, PhotoVariant])
+
+  final case class OrderId(value: Long) extends AnyVal
+  object OrderId {
+    implicit val encoder: Encoder[OrderId] = Encoder[Long].contramap(_.value)
+    implicit val decoder: Decoder[OrderId] = Decoder[Long].map(OrderId(_))
+  }
+
+  sealed trait PaymentMethod
+  object PaymentMethod {
+    final case class Card(last4: String, brand: String)            extends PaymentMethod
+    final case class BankTransfer(iban: String, reference: String) extends PaymentMethod
+    case object Cash                                               extends PaymentMethod
+
+    implicit val schema: Schema[PaymentMethod] = Schema.derivedSum[PaymentMethod](SumEncoding.Discriminator("type"))
+
+    implicit val encoder: Encoder[PaymentMethod] = Encoder.instance {
+      case Card(last4, brand)            => Json.obj("type" -> Json.fromString("Card"), "last4" -> last4.asJson, "brand" -> brand.asJson)
+      case BankTransfer(iban, reference) =>
+        Json.obj("type" -> Json.fromString("BankTransfer"), "iban" -> iban.asJson, "reference" -> reference.asJson)
+      case Cash => Json.obj("type" -> Json.fromString("Cash"))
+    }
+    implicit val decoder: Decoder[PaymentMethod] = Decoder.instance { c =>
+      c.downField("type").as[String].flatMap {
+        case "Card"         => Decoder.forProduct2[Card, String, String]("last4", "brand")(Card.apply).apply(c)
+        case "BankTransfer" => Decoder.forProduct2[BankTransfer, String, String]("iban", "reference")(BankTransfer.apply).apply(c)
+        case "Cash"         => Right(Cash)
+        case other          => Left(DecodingFailure(s"unknown payment method $other", c.history))
+      }
+    }
+  }
+
+  final case class PaymentRequest(orderId: OrderId, method: PaymentMethod, note: Option[String])
+  object PaymentRequest {
+    implicit val encoder: Encoder[PaymentRequest] =
+      Encoder.forProduct3("orderId", "method", "note")(r => (r.orderId, r.method, r.note))
+    implicit val decoder: Decoder[PaymentRequest] = Decoder.forProduct3("orderId", "method", "note")(PaymentRequest.apply)
+  }
+
+  final case class PaymentReceipt(orderId: OrderId, method: PaymentMethod, reference: Either[String, Long])
+  implicit val referenceEncoder: Encoder[Either[String, Long]] = Encoder.instance(_.fold(_.asJson, _.asJson))
+  implicit val referenceDecoder: Decoder[Either[String, Long]] =
+    Decoder[Long].map(Right(_): Either[String, Long]).or(Decoder[String].map(Left(_): Either[String, Long]))
+
+  object PaymentReceipt {
+    implicit val encoder: Encoder[PaymentReceipt] =
+      Encoder.forProduct3("orderId", "method", "reference")(r => (r.orderId, r.method, r.reference))
+    implicit val decoder: Decoder[PaymentReceipt] = Decoder.forProduct3("orderId", "method", "reference")(PaymentReceipt.apply)
+  }
+
+  final case class Category(id: Long, name: String, children: Seq[Category])
+  object Category {
+    implicit val encoder: Encoder[Category] = new Encoder[Category] {
+      def apply(c: Category): Json =
+        Json.obj("id" -> c.id.asJson, "name" -> c.name.asJson, "children" -> Json.fromValues(c.children.map(apply)))
+    }
+    implicit val decoder: Decoder[Category] = new Decoder[Category] {
+      def apply(c: HCursor): Decoder.Result[Category] =
+        for {
+          id       <- c.downField("id").as[Long]
+          name     <- c.downField("name").as[String]
+          children <- c.downField("children").as[Seq[Category]](Decoder.decodeSeq(this))
+        } yield Category(id, name, children)
+    }
+  }
 }

@@ -9,6 +9,9 @@ private[baklava] object SchemaMacros {
   def derived[T: Type](self: Expr[SchemaDerivation])(using q: Quotes): Expr[Schema[T]] =
     new SchemaMacros(q).deriveSchema[T](self, automatic = false)
 
+  def derivedSum[T: Type](self: Expr[SchemaDerivation], encoding: Expr[SumEncoding])(using q: Quotes): Expr[Schema[T]] =
+    new SchemaMacros(q).deriveSumSchema[T](self, encoding)
+
   def autoDerived[T: Type](self: Expr[SchemaDerivation])(using q: Quotes): Expr[Schema[T]] =
     new SchemaMacros(q).deriveSchema[T](self, automatic = true)
 }

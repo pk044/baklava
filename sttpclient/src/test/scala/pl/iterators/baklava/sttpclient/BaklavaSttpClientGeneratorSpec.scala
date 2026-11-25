@@ -307,6 +307,41 @@ class BaklavaSttpClientGeneratorSpec extends AnyFunSpec with Matchers {
   case class Variant(url: String, width: Int)
   case class ImageDto(id: String, variants: Map[String, Variant])
 
+  describe("sum types and recursive types (#141)") {
+
+    def shapesDtos(schema: BaklavaSchemaSerializable): String = {
+      cleanSrc()
+      val base = getCall("/shapes", tag = Some("Shapes"))
+      generateAndRead(
+        "src/main/scala/baklavaclient/shapes/dtos.scala",
+        Seq(base.let(c => c.copy(response = c.response.copy(bodySchema = Some(schema)))))
+      )
+    }
+
+    it("types sum-typed fields as io.circe.Json") {
+      val dtos = shapesDtos(BaklavaSchemaSerializable(implicitly[Schema[Checkout]]))
+      dtos should include("final case class Checkout(payment: io.circe.Json, reference: io.circe.Json)")
+      dtos should not include "CardPayment"
+    }
+
+    it("gives a recursive case class a companion codec") {
+      val dtos = shapesDtos(BaklavaSchemaSerializable(implicitly[Schema[TreeNode]]))
+      dtos should include("final case class TreeNode(children: Seq[TreeNode], label: String, parent: Option[TreeNode] = None)")
+      dtos should include(
+        "implicit lazy val codec: io.circe.Codec.AsObject[TreeNode] = io.circe.generic.semiauto.deriveCodec[TreeNode]"
+      )
+    }
+  }
+
+  sealed trait PaymentKind
+  case class CardPayment(last4: String) extends PaymentKind
+  case object CashPayment               extends PaymentKind
+  object PaymentKind {
+    implicit val schema: Schema[PaymentKind] = Schema.derivedSum[PaymentKind](SumEncoding.Discriminator("type"))
+  }
+  case class Checkout(payment: PaymentKind, reference: Either[String, Int])
+  case class TreeNode(label: String, children: List[TreeNode], parent: Option[TreeNode])
+
   private def namedObject(name: String, props: Map[String, PrimitiveSchema[?]]): BaklavaSchemaSerializable =
     BaklavaSchemaSerializable(
       className = name,

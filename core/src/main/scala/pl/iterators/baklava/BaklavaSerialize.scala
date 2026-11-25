@@ -94,25 +94,52 @@ case class BaklavaSchemaSerializable(
     // Value schema for a map-like object (`additionalProperties: <schema>`); `None` otherwise.
     additionalPropertiesSchema: Option[BaklavaSchemaSerializable] = None,
     // default keeps pre-#131 serialized call files decodable
-    nullable: Boolean = false
+    nullable: Boolean = false,
+    oneOf: Seq[BaklavaSchemaSerializable] = Nil,
+    discriminator: Option[SchemaDiscriminator] = None,
+    ref: Option[String] = None
 ) extends Serializable
 
 object BaklavaSchemaSerializable {
-  def apply[T](schema: Schema[T]): BaklavaSchemaSerializable = {
-    BaklavaSchemaSerializable(
-      className = schema.className,
-      `type` = schema.`type`,
-      format = schema.format,
-      properties = schema.properties.map { case (k, v) => k -> BaklavaSchemaSerializable(v) },
-      items = schema.items.map(BaklavaSchemaSerializable(_)),
-      `enum` = schema.`enum`,
-      required = schema.required,
-      additionalProperties = schema.additionalProperties,
-      default = schema.default.flatMap(encodeDefault(schema.`type`)),
-      description = schema.description,
-      additionalPropertiesSchema = schema.additionalPropertiesSchema.map(BaklavaSchemaSerializable(_)),
-      nullable = schema.nullable
-    )
+  def apply[T](schema: Schema[T]): BaklavaSchemaSerializable = serialize(schema, Nil)
+
+  private def serialize(schema: Schema[?], ancestors: List[AnyRef]): BaklavaSchemaSerializable = {
+    val default = schema.default.flatMap(encodeDefault(schema.`type`))
+    if (ancestors.exists(_ eq schema.recursionKey))
+      BaklavaSchemaSerializable(
+        className = schema.className,
+        `type` = schema.`type`,
+        format = None,
+        properties = Map.empty,
+        items = None,
+        `enum` = None,
+        required = schema.required,
+        additionalProperties = false,
+        default = default,
+        description = schema.description,
+        nullable = schema.nullable,
+        ref = Some(schema.className)
+      )
+    else {
+      val inner                                               = schema.recursionKey :: ancestors
+      def nested(child: Schema[?]): BaklavaSchemaSerializable = serialize(child, inner)
+      BaklavaSchemaSerializable(
+        className = schema.className,
+        `type` = schema.`type`,
+        format = schema.format,
+        properties = schema.properties.map { case (k, v) => k -> nested(v) },
+        items = schema.items.map(nested),
+        `enum` = schema.`enum`,
+        required = schema.required,
+        additionalProperties = schema.additionalProperties,
+        default = default,
+        description = schema.description,
+        additionalPropertiesSchema = schema.additionalPropertiesSchema.map(nested),
+        nullable = schema.nullable,
+        oneOf = schema.oneOf.map(nested),
+        discriminator = schema.discriminator
+      )
+    }
   }
 
   /** Encode a `Schema[T].default` value as structured JSON rather than `.toString`. Primitive types pick the matching `Json.from…`

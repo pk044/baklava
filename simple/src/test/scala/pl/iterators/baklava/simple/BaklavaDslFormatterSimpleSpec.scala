@@ -291,6 +291,30 @@ class BaklavaDslFormatterSimpleSpec extends AnyFunSpec with Matchers {
       description = None
     )
 
+  describe("JSON Schema for sum types and recursive types (#141)") {
+
+    it("renders a discriminated sum as oneOf, pinning the tag of each alternative with const") {
+      val json = parser
+        .parse(generator.jsonSchemaV7(BaklavaSchemaSerializable(Schema.derivedSum[Pet](SumEncoding.Discriminator("kind")))))
+        .toTry
+        .get
+      val oneOf  = json.hcursor.downField("oneOf")
+      val second = oneOf.downN(1).downField("allOf")
+      json.hcursor.downField("title").as[String] shouldBe Right("Pet")
+      second.downN(0).downField("title").as[String] shouldBe Right("Dog")
+      second.downN(1).downField("properties").downField("kind").downField("const").as[String] shouldBe Right("Dog")
+      second.downN(1).downField("required").as[List[String]] shouldBe Right(List("kind"))
+    }
+
+    it("puts recursive types in definitions and refers to them with $ref") {
+      val json = parser.parse(generator.jsonSchemaV7(BaklavaSchemaSerializable(implicitly[Schema[Folder]]))).toTry.get.hcursor
+      json.downField("properties").downField("folders").downField("items").downField("$ref").as[String] shouldBe
+      Right("#/definitions/Folder")
+      json.downField("definitions").downField("Folder").downField("properties").downField("name").downField("type").as[String] shouldBe
+      Right("string")
+    }
+  }
+
   private def objectSchema(props: Map[String, BaklavaSchemaSerializable]): BaklavaSchemaSerializable =
     BaklavaSchemaSerializable(
       className = "Obj",
@@ -337,3 +361,8 @@ class BaklavaDslFormatterSimpleSpec extends AnyFunSpec with Matchers {
       )
     )
 }
+
+sealed trait Pet
+final case class Cat(name: String) extends Pet
+final case class Dog(name: String) extends Pet
+final case class Folder(name: String, folders: List[Folder])

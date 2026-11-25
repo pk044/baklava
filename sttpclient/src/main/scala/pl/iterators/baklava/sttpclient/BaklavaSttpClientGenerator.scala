@@ -16,6 +16,12 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
   /** className → rendered case-class field list. */
   private val caseClassBody: Map[String, String] = collectCaseClasses(calls)
 
+  private val recursiveClasses: Set[String] = {
+    def refs(schema: BaklavaSchemaSerializable): Seq[String] =
+      schema.ref.toSeq ++ (schema.properties.values ++ schema.items ++ schema.additionalPropertiesSchema ++ schema.oneOf).flatMap(refs)
+    calls.flatMap(c => c.request.bodySchema.toSeq ++ c.response.bodySchema).flatMap(refs).toSet
+  }
+
   /** className → directly-referenced other named classes (not recursive). */
   private val directRefs: Map[String, Set[String]] = collectDirectRefs(calls)
 
@@ -35,7 +41,7 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
     val classes = sharedClasses.toSeq.sorted
     if (classes.isEmpty) None
     else {
-      val body = classes.map(cls => s"final case class ${scalaSafeIdent(cls)}(${caseClassBody(cls)})").mkString("\n\n")
+      val body = classes.map(renderCaseClass).mkString("\n\n")
       Some(s"package $basePackage.common\n\n$body\n")
     }
   }
@@ -54,6 +60,18 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
       val typesEntry = typesFile.map(c => s"$safeTag/dtos.scala" -> c).toSeq
       typesEntry :+ (s"$safeTag/$endpointsObj.scala" -> endsFile)
     }
+  }
+
+  private def renderCaseClass(cls: String): String = {
+    val name       = scalaSafeIdent(cls)
+    val definition = s"final case class $name(${caseClassBody(cls)})"
+    if (!recursiveClasses.contains(cls)) definition
+    else
+      s"""$definition
+         |
+         |object $name {
+         |  implicit lazy val codec: io.circe.Codec.AsObject[$name] = io.circe.generic.semiauto.deriveCodec[$name]
+         |}""".stripMargin
   }
 
   private def endpointsObjectName(tag: String): String =
@@ -80,7 +98,7 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
       }
 
       val imports = if (importLines.isEmpty) "" else importLines.mkString("\n") + "\n\n"
-      val body    = tagClasses.map(cls => s"final case class ${scalaSafeIdent(cls)}(${caseClassBody(cls)})").mkString("\n\n")
+      val body    = tagClasses.map(renderCaseClass).mkString("\n\n")
 
       Some(s"package $basePackage.$safeTag\n\n$imports$body\n")
     }
@@ -258,6 +276,7 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
     * non-JSON bodies keep working.
     */
   private def isTypedBodySchema(schema: BaklavaSchemaSerializable): Boolean = schema.`type` match {
+    case _ if schema.oneOf.nonEmpty || schema.ref.isDefined                  => false
     case SchemaType.ObjectType if isNamedCaseClass(schema)                   => true
     case SchemaType.ObjectType if schema.additionalPropertiesSchema.nonEmpty => true
     case SchemaType.ArrayType                                                => schema.items.exists(isTypedBodySchema)
@@ -423,6 +442,7 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
   private def collectDirectRefs(calls: Seq[BaklavaSerializableCall]): Map[String, Set[String]] = {
     val byClassName = scala.collection.mutable.Map.empty[String, Set[String]].withDefaultValue(Set.empty)
     def findTopLevelRef(s: BaklavaSchemaSerializable): Set[String] = s.`type` match {
+      case _ if s.ref.isDefined                         => s.ref.toSet
       case SchemaType.ObjectType if isNamedCaseClass(s) => Set(s.className)
       case SchemaType.ObjectType                        => s.additionalPropertiesSchema.toSet.flatMap(findTopLevelRef)
       case SchemaType.ArrayType                         => s.items.toSet.flatMap(findTopLevelRef)
@@ -504,6 +524,8 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
   private def isNamedCaseClass(schema: BaklavaSchemaSerializable): Boolean =
     schema.`type` == SchemaType.ObjectType &&
       schema.properties.nonEmpty &&
+      schema.className.nonEmpty &&
+      schema.oneOf.isEmpty &&
       !schema.className.contains("[") &&
       !Set("FormData", "UrlForm", "Multipart").contains(schema.className)
 
@@ -517,9 +539,11 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
   }
 
   private def scalaType(schema: BaklavaSchemaSerializable): String = schema.`type` match {
-    case SchemaType.NullType    => "None.type"
-    case SchemaType.BooleanType => "Boolean"
-    case SchemaType.IntegerType =>
+    case _ if schema.ref.isDefined  => scalaSafeIdent(schema.ref.get)
+    case _ if schema.oneOf.nonEmpty => "io.circe.Json"
+    case SchemaType.NullType        => "None.type"
+    case SchemaType.BooleanType     => "Boolean"
+    case SchemaType.IntegerType     =>
       schema.format match {
         case Some("int64") => "Long"
         case _             => "Int"
@@ -597,6 +621,10 @@ private[sttpclient] class BaklavaSttpClientGenerator(basePackage: String, calls:
        |Endpoints whose body isn't a named schema (multipart, plain-text, empty) keep the
        |raw `bodyJson: String` input. Endpoints whose 2xx response isn't a named JSON schema keep
        |the raw `Either[String, String]` response, so you can still use them without circe.
+       |
+       |Fields whose type is a sum type (a sealed trait, an `Either`) are typed as `io.circe.Json`.
+       |A case class that refers to itself gets a companion with a `deriveCodec` instance, since
+       |`generic.auto` cannot derive recursive types on Scala 3.
        |
        |## Dependencies
        |

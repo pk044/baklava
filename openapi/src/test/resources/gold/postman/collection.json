@@ -215,6 +215,102 @@
       ]
     },
     {
+      "name" : "Catalog",
+      "item" : [
+        {
+          "name" : "List categories",
+          "request" : {
+            "method" : "GET",
+            "header" : [
+            ],
+            "url" : {
+              "raw" : "{{baseUrl}}/categories",
+              "host" : [
+                "{{baseUrl}}"
+              ],
+              "path" : [
+                "categories"
+              ]
+            },
+            "description" : "The category tree"
+          },
+          "response" : [
+            {
+              "name" : "Top-level categories with their subcategories",
+              "status" : "OK",
+              "code" : 200,
+              "header" : [
+              ],
+              "body" : "[{\"id\":1,\"name\":\"Books\",\"children\":[{\"id\":2,\"name\":\"Fiction\",\"children\":[]},{\"id\":3,\"name\":\"Science\",\"children\":[]}]}]",
+              "_postman_previewlanguage" : "json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name" : "Payments",
+      "item" : [
+        {
+          "name" : "Pay for an order",
+          "request" : {
+            "method" : "POST",
+            "header" : [
+            ],
+            "url" : {
+              "raw" : "{{baseUrl}}/payments",
+              "host" : [
+                "{{baseUrl}}"
+              ],
+              "path" : [
+                "payments"
+              ]
+            },
+            "body" : {
+              "mode" : "raw",
+              "raw" : "{\"orderId\":1001,\"method\":{\"type\":\"Card\",\"last4\":\"4242\",\"brand\":\"visa\"},\"note\":\"Leave at the door\"}",
+              "options" : {
+                "raw" : {
+                  "language" : "json"
+                }
+              }
+            },
+            "auth" : {
+              "type" : "bearer",
+              "bearer" : [
+                {
+                  "key" : "token",
+                  "value" : "{{bearerAuthToken}}",
+                  "type" : "string"
+                }
+              ]
+            },
+            "description" : "Pay for an order with a card, a bank transfer or cash"
+          },
+          "response" : [
+            {
+              "name" : "Card payment accepted",
+              "status" : "Created",
+              "code" : 201,
+              "header" : [
+              ],
+              "body" : "{\"orderId\":1001,\"method\":{\"type\":\"Card\",\"last4\":\"4242\",\"brand\":\"visa\"},\"reference\":98765}",
+              "_postman_previewlanguage" : "json"
+            },
+            {
+              "name" : "Cash payment recorded",
+              "status" : "Created",
+              "code" : 201,
+              "header" : [
+              ],
+              "body" : "{\"orderId\":1002,\"method\":{\"type\":\"Cash\"},\"reference\":\"CASH-1002\"}",
+              "_postman_previewlanguage" : "json"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name" : "Projects",
       "item" : [
         {

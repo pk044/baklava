@@ -59,6 +59,8 @@ Each endpoint page contains an HTML table with:
 - Response body examples per status code
 - Response body schema per status code
 
+Sum types are rendered as `oneOf`; with a discriminator, each alternative is an `allOf` of the subtype and an object pinning the tag with `const`. A recursive type is placed under `definitions` and referenced with `$ref`.
+
 This is the simplest format to get started — no configuration, no external tools needed.
 
 ## OpenAPI Format
@@ -75,9 +77,16 @@ Generates a single OpenAPI 3.0.1 YAML specification file containing:
   - Request body with media type, schema, and multiple examples from different test cases
   - Responses grouped by status code, each with schema, examples, and response headers
 - **Security schemes** auto-detected from your test cases (bearer, basic, API key, OAuth2, OpenID Connect, mutual TLS)
-- **Components** section with all referenced security scheme definitions
+- **Components** section with all referenced security scheme definitions, plus the schemas that must be referenced by name (see below)
 
 When multiple test cases cover the same endpoint with different inputs/outputs, they appear as separate examples in the OpenAPI spec.
+
+Schemas are inlined where they are used, with two exceptions that go to `components/schemas`:
+
+- **Sum types** ([`Schema.derivedSum`](dsl-reference.md#sum-types), `Either`) are rendered as `oneOf`. With `SumEncoding.Discriminator`, each subtype is hoisted to `components/schemas` with the tag added as a required single-value property, and the `oneOf` gets a `discriminator` with a `mapping` from each tag to its subtype. The wrapper-object and untagged encodings stay inline.
+- **Recursive types** are hoisted under their class name and every occurrence, including the one inside the type itself, becomes a `$ref`. An optional (nullable) occurrence is written as `allOf: [$ref]` with `nullable: true`, since OpenAPI 3.0 ignores siblings of `$ref`.
+
+A discriminated subtype whose class name is already taken by another component gets a numbered name (`Card2`). Recursive types are matched by their short class name, so two different recursive types with the same name in one API would share a component; rename one of them.
 
 ### Configuration
 
@@ -141,8 +150,13 @@ Baklava schemas are converted to Zod validators:
 | Case class | `z.object({ field: schema, ... })` |
 | `Map[K, V]` | `z.record(z.string(), innerSchema)` |
 | `Option[T]` | `schema.nullish()` |
+| Sum type, discriminator encoding | `z.discriminatedUnion("type", [cardSchema.extend({"type": z.literal("Card")}), ...])` |
+| Sum type, wrapper-object or untagged encoding, `Either[A, B]` | `z.union([...])` |
+| Recursive reference | `z.lazy(() => categorySchema)` |
 
 When multiple test cases produce different schemas for the same endpoint input/output, they are combined into `z.union([...])`.
+
+`z.infer` cannot type a schema that refers to itself, so a recursive type gets an explicit TypeScript type, and its schema is annotated with it (`export const categorySchema: z.ZodType<Category> = ...`). The other members of the cycle keep inferred types.
 
 Object keys that aren't valid JavaScript identifiers (e.g. kebab-case query/header parameters like `seller-id` or `X-Forwarded-For`) are emitted quoted so the generated source compiles.
 
@@ -517,6 +531,8 @@ Endpoints with a request body emit `.contentType(...)` honoring the content-type
 | Named case class | Case class (emitted in the owning tag's `dtos.scala` or `common/dtos.scala`) |
 | `Map[K, V]` | `Map[String, V]` |
 | `Option[T]` | Field becomes `Option[T] = None` |
+| Sum type, `Either[A, B]` | `io.circe.Json` |
+| Recursive case class | Case class whose companion holds a `deriveCodec` instance (circe's `generic.auto` cannot derive recursive types on Scala 3) |
 
 ### Configuration
 
@@ -606,6 +622,9 @@ Endpoint files import types from the appropriate location (`./types`, the shared
 | Case class with properties | Named `interface` (re-exported per-module as `Users.ClassName` / shared as `Common.ClassName`) |
 | `Map[K, V]` | `Record<string, V>` |
 | `Option[T]` | Field becomes optional (`field?: T`) |
+| Sum type, discriminator encoding | Union of tagged subtypes, e.g. `({ type: "Card" } & Card) \| ({ type: "Cash" } & Record<string, unknown>)` |
+| Sum type, other encodings, `Either[A, B]` | Union of the alternatives |
+| Recursive reference | The interface's own name |
 
 ### Configuration
 

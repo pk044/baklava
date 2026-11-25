@@ -9,6 +9,9 @@ private[baklava] class SchemaMacros(val c: whitebox.Context) extends hearth.Macr
   def derivedImpl[T: c.WeakTypeTag]: c.Expr[Schema[T]] =
     resettle(deriveSchema[T](c.Expr[SchemaDerivation](c.prefix.tree), automatic = false))
 
+  def derivedSumImpl[T: c.WeakTypeTag](encoding: c.Expr[SumEncoding]): c.Expr[Schema[T]] =
+    resettle(deriveSumSchema[T](c.Expr[SchemaDerivation](c.prefix.tree), encoding))
+
   def genImpl[T: c.WeakTypeTag]: c.Expr[Schema[T]] =
     resettle(deriveSchema[T](c.Expr[SchemaDerivation](c.prefix.tree), automatic = true))
 

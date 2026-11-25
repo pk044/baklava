@@ -11,10 +11,30 @@ object TsSchemaRefs {
 
   def collectObjectNodes(schema: BaklavaSchemaSerializable): Seq[BaklavaSchemaSerializable] = {
     val children =
-      schema.properties.values.toSeq ++ schema.items.toSeq ++ schema.additionalPropertiesSchema.toSeq
-    val self =
-      if (schema.`type` == SchemaType.ObjectType && schema.properties.nonEmpty) Seq(schema) else Seq.empty
+      schema.properties.values.toSeq ++ schema.items.toSeq ++ schema.additionalPropertiesSchema.toSeq ++ schema.oneOf
+    val isNamedSum = schema.oneOf.nonEmpty && schema.className.nonEmpty
+    val self       =
+      if (schema.ref.isEmpty && ((schema.`type` == SchemaType.ObjectType && schema.properties.nonEmpty) || isNamedSum)) Seq(schema)
+      else Seq.empty
     self ++ children.flatMap(collectObjectNodes)
+  }
+
+  def containsRef(schema: BaklavaSchemaSerializable): Boolean =
+    schema.ref.isDefined ||
+      (schema.properties.values ++ schema.items ++ schema.additionalPropertiesSchema ++ schema.oneOf).exists(containsRef)
+
+  private def refNames(schema: BaklavaSchemaSerializable): Seq[String] =
+    schema.ref.toSeq ++ (schema.properties.values ++ schema.items ++ schema.additionalPropertiesSchema ++ schema.oneOf).flatMap(refNames)
+
+  def classRefs(refs: Map[BaklavaSchemaSerializable, String]): Map[String, String] = {
+    val targets = refs.keys.toSeq.flatMap(refNames).toSet
+    targets.toSeq.flatMap { target =>
+      refs.toSeq
+        .filter { case (schema, _) => schema.className == target }
+        .sortBy { case (schema, name) => (!(schema.required && !schema.nullable), name) }
+        .headOption
+        .map { case (_, name) => target -> name }
+    }.toMap
   }
 
   private val genericClassNames = Set("Object", "Map", "Option", "Some", "None", "List", "Seq", "Vector", "Set")
@@ -92,7 +112,8 @@ object TsSchemaRefs {
   def schemasFileContent(
       refs: Map[BaklavaSchemaSerializable, String],
       definitionWithRefs: BaklavaSchemaSerializable => String,
-      importLines: Seq[String] = Seq.empty
+      importLines: Seq[String] = Seq.empty,
+      explicitType: (BaklavaSchemaSerializable, String) => Option[String] = (_, _) => None
   ): String = {
     val remaining = scala.collection.mutable.LinkedHashMap.from(refs.toSeq.sortBy(_._2))
     val ordered   = scala.collection.mutable.ListBuffer.empty[(BaklavaSchemaSerializable, String)]
@@ -107,7 +128,12 @@ object TsSchemaRefs {
     }
     val defs = ordered
       .map { case (schema, name) =>
-        s"export const $name = ${definitionWithRefs(schema)};\nexport type ${typeNameOf(name)} = z.infer<typeof $name>;"
+        explicitType(schema, name) match {
+          case Some(tsType) =>
+            s"export type ${typeNameOf(name)} = $tsType;\nexport const $name: z.ZodType<${typeNameOf(name)}> = ${definitionWithRefs(schema)};"
+          case None =>
+            s"export const $name = ${definitionWithRefs(schema)};\nexport type ${typeNameOf(name)} = z.infer<typeof $name>;"
+        }
       }
       .mkString("\n\n")
     val imports = ("import { z } from \"zod\";" +: importLines).mkString("\n")

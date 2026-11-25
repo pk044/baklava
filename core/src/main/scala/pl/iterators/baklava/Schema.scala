@@ -17,14 +17,16 @@ object SchemaType {
   case object ObjectType extends SchemaType
 }
 
+final case class SchemaDiscriminator(propertyName: String, values: Seq[String])
+
 @scala.annotation.implicitNotFound(
-  "No Schema[${T}] found. Only case classes and case objects get one derived; define one for other types, e.g. sealed traits and enums."
+  "No Schema[${T}] found. Only case classes, case objects and value classes get one derived; for a sealed trait or enum use Schema.derivedSum, or define one."
 )
 trait Schema[T] {
   val className: String
   val `type`: SchemaType
   val format: Option[String]
-  val properties: Map[String, Schema[?]]
+  def properties: Map[String, Schema[?]]
   val items: Option[Schema[?]]
   val `enum`: Option[Set[String]]
   val required: Boolean
@@ -39,49 +41,23 @@ trait Schema[T] {
   // may be explicitly null, not just absent — set by optionSchema (#131)
   def nullable: Boolean = false
 
-  def withDescription(_description: String): Schema[T] = new Schema[T] {
-    val className: String                                      = Schema.this.className
-    val `type`: SchemaType                                     = Schema.this.`type`
-    val format: Option[String]                                 = Schema.this.format
-    val properties: Map[String, Schema[?]]                     = Schema.this.properties
-    val items: Option[Schema[?]]                               = Schema.this.items
-    val `enum`: Option[Set[String]]                            = Schema.this.`enum`
-    val required: Boolean                                      = Schema.this.required
-    val additionalProperties: Boolean                          = Schema.this.additionalProperties
-    override val additionalPropertiesSchema: Option[Schema[?]] = Schema.this.additionalPropertiesSchema
-    override val nullable: Boolean                             = Schema.this.nullable
-    val default: Option[T]                                     = Schema.this.default
-    val description: Option[String]                            = Some(_description)
+  def oneOf: Seq[Schema[?]] = Nil
+
+  def discriminator: Option[SchemaDiscriminator] = None
+
+  def recursionKey: AnyRef = this
+
+  def withDescription(_description: String): Schema[T] = new Schema.Delegating[T](this, required, nullable) {
+    val default: Option[T]          = Schema.this.default
+    val description: Option[String] = Some(_description)
   }
 
-  def withDefault(_default: T): Schema[T] = new Schema[T] {
-    val className: String                                      = Schema.this.className
-    val `type`: SchemaType                                     = Schema.this.`type`
-    val format: Option[String]                                 = Schema.this.format
-    val properties: Map[String, Schema[?]]                     = Schema.this.properties
-    val items: Option[Schema[?]]                               = Schema.this.items
-    val `enum`: Option[Set[String]]                            = Schema.this.`enum`
-    val required: Boolean                                      = Schema.this.required
-    val additionalProperties: Boolean                          = Schema.this.additionalProperties
-    override val additionalPropertiesSchema: Option[Schema[?]] = Schema.this.additionalPropertiesSchema
-    override val nullable: Boolean                             = Schema.this.nullable
-    val default: Option[T]                                     = Some(_default)
-    val description: Option[String]                            = Schema.this.description
+  def withDefault(_default: T): Schema[T] = new Schema.Delegating[T](this, required, nullable) {
+    val default: Option[T]          = Some(_default)
+    val description: Option[String] = Schema.this.description
   }
 
-  override def toString: String = {
-    `type` match {
-      case _ if `enum`.isDefined  => s"enum(${`enum`.get.mkString(", ")})"
-      case SchemaType.NullType    => "null"
-      case SchemaType.StringType  => "string"
-      case SchemaType.BooleanType => "boolean"
-      case SchemaType.IntegerType => "integer"
-      case SchemaType.NumberType  => "number"
-      case SchemaType.ArrayType   => s"array(${items.getOrElse("unknown")})"
-      case SchemaType.ObjectType  =>
-        s"object(${properties.map { case (k, v) => k + (if (v.required) "*" else "") + ": " + v.toString }.mkString(", ")})"
-    }
-  }
+  override def toString: String = Schema.render(this, Nil)
 }
 
 case class PrimitiveSchema[T](
@@ -135,20 +111,27 @@ trait SchemaDefaults {
   implicit val nullSchema: PrimitiveSchema[Null]             = PrimitiveSchema[Null]("Null", SchemaType.NullType, None)
   implicit val unitSchema: PrimitiveSchema[Unit]             = PrimitiveSchema[Unit]("Unit", SchemaType.NullType, None)
   implicit val bigDecimalSchema: PrimitiveSchema[BigDecimal] = PrimitiveSchema[BigDecimal]("BigDecimal", SchemaType.NumberType, None)
-  implicit def optionSchema[T](implicit schema: Schema[T]): Schema[Option[T]] = new Schema[Option[T]] {
-    val className: String                                      = schema.className
-    val `type`: SchemaType                                     = schema.`type`
-    val format: Option[String]                                 = schema.format
-    val properties: Map[String, Schema[?]]                     = schema.properties
-    val items: Option[Schema[?]]                               = schema.items
-    val `enum`: Option[Set[String]]                            = schema.`enum`
-    val required: Boolean                                      = false
-    val additionalProperties: Boolean                          = schema.additionalProperties
-    override val additionalPropertiesSchema: Option[Schema[?]] = schema.additionalPropertiesSchema
-    override val nullable: Boolean                             = true
-    val default: Option[Option[T]]                             = Some(None)
-    val description: Option[String]                            = schema.description
-  }
+  implicit def optionSchema[T](implicit schema: Schema[T]): Schema[Option[T]] =
+    new Schema.Delegating[Option[T]](schema, required = false, nullable = true) {
+      val default: Option[Option[T]]  = Some(None)
+      val description: Option[String] = schema.description
+    }
+
+  implicit def eitherSchema[L, R](implicit left: Schema[L], right: Schema[R]): Schema[Either[L, R]] =
+    Schema.oneOfSchema[Either[L, R]](
+      s"Either[${left.className}, ${right.className}]",
+      Seq(left, right),
+      `type` = if (left.`type` == right.`type`) left.`type` else SchemaType.ObjectType
+    )
+
+  def eitherWrappedSchema[L, R](leftKey: String = "Left", rightKey: String = "Right")(implicit
+      left: Schema[L],
+      right: Schema[R]
+  ): Schema[Either[L, R]] =
+    Schema.oneOfSchema[Either[L, R]](
+      s"Either[${left.className}, ${right.className}]",
+      Seq(Schema.wrapperObject(leftKey, left), Schema.wrapperObject(rightKey, right))
+    )
   implicit def seqSchema[T](implicit schema: Schema[T]): Schema[Seq[T]] = new Schema[Seq[T]] {
     val className: String                  = "Seq[" + schema.className + "]"
     val `type`: SchemaType                 = SchemaType.ArrayType
@@ -238,4 +221,77 @@ trait SchemaDefaults {
 object Schema extends SchemaDerivation with SchemaDefaults {
   // every SchemaDefaults mixin carries its own emptyBodySchema instance, so identity checks miss
   def isEmptyBody(schema: Schema[?]): Boolean = schema.`type` == SchemaType.NullType && schema.className == "EmptyBody"
+
+  abstract class Delegating[T](underlying: Schema[?], val required: Boolean, override val nullable: Boolean) extends Schema[T] {
+    val className: String                                      = underlying.className
+    val `type`: SchemaType                                     = underlying.`type`
+    val format: Option[String]                                 = underlying.format
+    def properties: Map[String, Schema[?]]                     = underlying.properties
+    val items: Option[Schema[?]]                               = underlying.items
+    val `enum`: Option[Set[String]]                            = underlying.`enum`
+    val additionalProperties: Boolean                          = underlying.additionalProperties
+    override def additionalPropertiesSchema: Option[Schema[?]] = underlying.additionalPropertiesSchema
+    override def oneOf: Seq[Schema[?]]                         = underlying.oneOf
+    override def discriminator: Option[SchemaDiscriminator]    = underlying.discriminator
+    override def recursionKey: AnyRef                          = underlying.recursionKey
+  }
+
+  def oneOfSchema[T](
+      className: String,
+      alternatives: => Seq[Schema[?]],
+      discriminator: Option[SchemaDiscriminator] = None,
+      `type`: SchemaType = SchemaType.ObjectType
+  ): Schema[T] = {
+    val _className     = className
+    val _discriminator = discriminator
+    val _type          = `type`
+    new Schema[T] {
+      val className: String                                   = _className
+      val `type`: SchemaType                                  = _type
+      val format: Option[String]                              = None
+      val properties: Map[String, Schema[?]]                  = Map.empty
+      val items: Option[Schema[?]]                            = None
+      val `enum`: Option[Set[String]]                         = None
+      val required: Boolean                                   = true
+      val additionalProperties: Boolean                       = false
+      val default: Option[T]                                  = None
+      val description: Option[String]                         = None
+      override lazy val oneOf: Seq[Schema[?]]                 = alternatives
+      override val discriminator: Option[SchemaDiscriminator] = _discriminator
+    }
+  }
+
+  def wrapperObject(key: String, schema: => Schema[?]): Schema[Any] =
+    new Schema[Any] {
+      val className: String                       = ""
+      val `type`: SchemaType                      = SchemaType.ObjectType
+      val format: Option[String]                  = None
+      lazy val properties: Map[String, Schema[?]] = Map(key -> schema)
+      val items: Option[Schema[?]]                = None
+      val `enum`: Option[Set[String]]             = None
+      val required: Boolean                       = true
+      val additionalProperties: Boolean           = false
+      val default: Option[Any]                    = None
+      val description: Option[String]             = None
+    }
+
+  private def render(schema: Schema[?], ancestors: List[AnyRef]): String =
+    if (ancestors.exists(_ eq schema.recursionKey)) s"ref(${schema.className})"
+    else {
+      val inner = schema.recursionKey :: ancestors
+      if (schema.oneOf.nonEmpty) s"oneOf(${schema.oneOf.map(render(_, inner)).mkString(", ")})"
+      else
+        schema.`type` match {
+          case _ if schema.`enum`.isDefined => s"enum(${schema.`enum`.get.mkString(", ")})"
+          case SchemaType.NullType          => "null"
+          case SchemaType.StringType        => "string"
+          case SchemaType.BooleanType       => "boolean"
+          case SchemaType.IntegerType       => "integer"
+          case SchemaType.NumberType        => "number"
+          case SchemaType.ArrayType         => s"array(${schema.items.fold("unknown")(render(_, inner))})"
+          case SchemaType.ObjectType        =>
+            val props = schema.properties.map { case (k, v) => k + (if (v.required) "*" else "") + ": " + render(v, inner) }
+            s"object(${props.mkString(", ")})"
+        }
+    }
 }

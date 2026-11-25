@@ -11,28 +11,34 @@ private[baklava] trait SchemaMacrosImpl { this: MacroCommons =>
 
   import SchemaMacrosImpl.*
 
-  def deriveSchema[A: Type](self: Expr[SchemaDerivation], automatic: Boolean): Expr[Schema[A]] = {
-    val program: MIO[Expr[Schema[A]]] =
-      if (automatic && NestedLookup.active) MIO.fail(Declined)
-      else
-        MIO.scoped { runSafe =>
-          val ctx = new Ctx(self, ValDefsCache.mlocal)
-          val top = runSafe(deriveStructurally[A](ctx)).getOrElse(runSafe(MIO.fail(NotDerivable(Type.plainPrint[A]))))
-          runSafe(ctx.cache.get).toValDefs.use(_ => top)
-        }
+  def deriveSchema[A: Type](self: Expr[SchemaDerivation], automatic: Boolean): Expr[Schema[A]] =
+    if (automatic && NestedLookup.active) run[A](MIO.fail(Declined))
+    else derivedWith[A](self)(deriveStructurally[A](_).map(_.toRight(NotDerivable(Type.plainPrint[A]))))
 
-    // not runToExprOrFail: a nested type's instance (e.g. Wrapper[Dto]) can expand this macro again while this run is
-    // still going, and runToExprOrFail must not be re-entered
+  def deriveSumSchema[A: Type](self: Expr[SchemaDerivation], encoding: Expr[SumEncoding]): Expr[Schema[A]] =
+    derivedWith[A](self)(deriveSum[A](_, encoding).map(_.toRight(NotASum(Type.plainPrint[A]))))
+
+  private def derivedWith[A: Type](self: Expr[SchemaDerivation])(derive: Ctx => MIO[Either[Throwable, Expr[Schema[A]]]]): Expr[Schema[A]] =
+    run[A](MIO.scoped { runSafe =>
+      val ctx = new Ctx(self, ValDefsCache.mlocal)
+      val top = runSafe(derive(ctx)).fold(error => runSafe(MIO.fail(error)), identity)
+      runSafe(ctx.cache.get).toValDefs.use(_ => top)
+    })
+
+  // not runToExprOrFail: a nested type's instance (e.g. Wrapper[Dto]) can expand this macro again while this run is
+  // still going, and runToExprOrFail must not be re-entered
+  private def run[A: Type](program: MIO[Expr[Schema[A]]]): Expr[Schema[A]] =
     program.unsafe.runSync._2 match {
       case Right(expr)  => expr
       case Left(errors) => Environment.reportErrorAndAbort(errors.toVector.map(describe(Type.plainPrint[A], _)).mkString("\n"))
     }
-  }
 
   private def describe(typeName: String, error: Throwable): String = error match {
     case Declined              => s"Schema[$typeName] is derived by the enclosing derivation"
     case NotDerivable(missing) =>
-      s"cannot derive Schema[$missing]: only case classes and case objects are derived, and no Schema[$missing] is in scope"
+      s"cannot derive Schema[$missing]: only case classes, case objects and value classes are derived, and no Schema[$missing] is in scope"
+    case NotASum(sum) =>
+      s"cannot derive Schema[$sum] with derivedSum: only sealed traits and enums whose subtypes are case classes or case objects are supported"
     case other => s"cannot derive Schema[$typeName]: $other"
   }
 
@@ -66,24 +72,74 @@ private[baklava] trait SchemaMacrosImpl { this: MacroCommons =>
   private def existingInstance[A](implicit SchemaA: Type[Schema[A]]): Option[Expr[Schema[A]]] =
     NestedLookup.during(Expr.summonImplicit[Schema[A]].toOption)
 
-  private def deriveStructurally[A: Type](ctx: Ctx): MIO[Option[Expr[Schema[A]]]] = {
+  private def cached[A: Type](ctx: Ctx)(body: => MIO[Expr[Schema[A]]]): MIO[Option[Expr[Schema[A]]]] = {
     implicit val SchemaA: Type[Schema[A]] = Types.Schema[A]
-    val className                         = Expr(Type.shortName[A])
+    val key                               = cacheKey[A]
+    val builder                           = ValDefBuilder.ofLazy[Schema[A]]("schema")
+    for {
+      _   <- ctx.cache.forwardDeclare(key, builder)
+      b   <- body
+      _   <- ctx.cache.buildCachedWith(key, builder)(_ => b)
+      ref <- ctx.cache.get0Ary[Schema[A]](key)
+    } yield ref
+  }
 
-    def cached(body: => MIO[Expr[Schema[A]]]): MIO[Option[Expr[Schema[A]]]] = {
-      val key     = cacheKey[A]
-      val builder = ValDefBuilder.ofLazy[Schema[A]]("schema")
-      for {
-        _   <- ctx.cache.forwardDeclare(key, builder)
-        b   <- body
-        _   <- ctx.cache.buildCachedWith(key, builder)(_ => b)
-        ref <- ctx.cache.get0Ary[Schema[A]](key)
-      } yield ref
+  private def deriveSum[A: Type](ctx: Ctx, encoding: Expr[SumEncoding]): MIO[Option[Expr[Schema[A]]]] =
+    Type.exhaustiveChildren[A] match {
+      case None           => MIO.pure(None)
+      case Some(children) =>
+        val sorted = children.toList.map(_._2).sortBy(child => Type.shortName(using child.Underlying))
+        cached[A](ctx) {
+          sorted
+            .foldLeft(MIO.pure(List.empty[Expr[SchemaDerivation.Subtype]])) { (acc, child) =>
+              import child.Underlying as C
+              acc.flatMap(subtypes => deriveNested[C](ctx).map(schema => subtypeExpr[C](schema) :: subtypes))
+            }
+            .map(subtypes => sumExpr[A](ctx.self, Expr(Type.shortName[A]), encoding, subtypes.reverse))
+        }
     }
 
+  private def subtypeExpr[C: Type](schema: Expr[Schema[C]]): Expr[SchemaDerivation.Subtype] =
+    Expr.quote {
+      new _root_.pl.iterators.baklava.SchemaDerivation.Subtype(Expr.splice(Expr(Type.shortName[C])), Expr.splice(schema))
+    }
+
+  private def sumExpr[A: Type](
+      self: Expr[SchemaDerivation],
+      className: Expr[String],
+      encoding: Expr[SumEncoding],
+      subtypes: List[Expr[SchemaDerivation.Subtype]]
+  ): Expr[Schema[A]] = {
+    val list = subtypes.foldRight(Expr.quote(_root_.scala.List.empty[_root_.pl.iterators.baklava.SchemaDerivation.Subtype])) {
+      (subtype, acc) => Expr.quote(Expr.splice(subtype) :: Expr.splice(acc))
+    }
+    Expr.quote(Expr.splice(self).deriveSum[A](Expr.splice(className), Expr.splice(encoding), Expr.splice(list)))
+  }
+
+  private def deriveStructurally[A: Type](ctx: Ctx): MIO[Option[Expr[Schema[A]]]] =
+    deriveValueClass[A](ctx).flatMap {
+      case Some(unwrapped) => MIO.pure(Some(unwrapped))
+      case None            => deriveProductOrObject[A](ctx)
+    }
+
+  private def deriveValueClass[A: Type](ctx: Ctx): MIO[Option[Expr[Schema[A]]]] =
+    if (!(Type[A] <:< Types.AnyVal) || Type.isPrimitive[A]) MIO.pure(None)
+    else
+      CaseClass.parse[A].toOption.map(_.primaryConstructor.parameters.flatMap(_.values).filterNot(_.isImplicit)) match {
+        case Some(List(param)) =>
+          import param.tpe.Underlying as F
+          deriveNested[F](ctx).map(inner => Some(unwrappedExpr[A, F](inner)))
+        case _ => MIO.pure(None)
+      }
+
+  private def unwrappedExpr[A: Type, F: Type](inner: Expr[Schema[F]]): Expr[Schema[A]] =
+    Expr.quote(Expr.splice(inner).asInstanceOf[_root_.pl.iterators.baklava.Schema[A]])
+
+  private def deriveProductOrObject[A: Type](ctx: Ctx): MIO[Option[Expr[Schema[A]]]] = {
+    val className = Expr(Type.shortName[A])
     CaseClass.parse[A].toOption match {
       case Some(caseClass) =>
-        cached {
+        cached[A](ctx) {
           val params = caseClass.primaryConstructor.parameters.flatMap(_.values).filterNot(_.isImplicit)
           params
             .foldLeft(MIO.pure(List.empty[Expr[SchemaDerivation.Field]])) { (acc, param) =>
@@ -92,7 +148,7 @@ private[baklava] trait SchemaMacrosImpl { this: MacroCommons =>
             .map(fields => productExpr[A](ctx.self, className, fields.reverse))
         }
       case None if Type.isCaseObject[A] || Type.isCaseVal[A] =>
-        cached(MIO.pure(productExpr[A](ctx.self, className, Nil)))
+        cached[A](ctx)(MIO.pure(productExpr[A](ctx.self, className, Nil)))
       case None => MIO.pure(None)
     }
   }
@@ -171,6 +227,19 @@ private[baklava] trait SchemaMacrosImpl { this: MacroCommons =>
             Expr.quote(_root_.pl.iterators.baklava.Schema.arraySchema[T](Expr.splice(s)))
         }))
         .orElse {
+          Types.Either.unapply(Type[A]).collect {
+            case (left, right) if Type[A] =:= Types.Either[left.Underlying, right.Underlying](using left.Underlying, right.Underlying) =>
+              import left.Underlying as L
+              import right.Underlying as R
+              for {
+                l <- deriveNested[L](ctx)
+                r <- deriveNested[R](ctx)
+              } yield Expr
+                .quote(_root_.pl.iterators.baklava.Schema.eitherSchema[L, R](Expr.splice(l), Expr.splice(r)))
+                .asInstanceOf[Expr[Schema[A]]]
+          }
+        }
+        .orElse {
           Types.Map.unapply(Type[A]).collect {
             case (key, value) if Type[A] =:= Types.Map[key.Underlying, value.Underlying](using key.Underlying, value.Underlying) =>
               import key.Underlying as K
@@ -210,6 +279,8 @@ private[baklava] trait SchemaMacrosImpl { this: MacroCommons =>
 
   private object Types {
     val Any: Type[Any]                                  = Type.of[Any]
+    val AnyVal: Type[AnyVal]                            = Type.of[AnyVal]
+    val Either: Type.Ctor2[scala.util.Either]           = Type.Ctor2.of[scala.util.Either]
     val Schema: Type.Ctor1[pl.iterators.baklava.Schema] = Type.Ctor1.of[pl.iterators.baklava.Schema]
     val Option: Type.Ctor1[scala.Option]                = Type.Ctor1.of[scala.Option]
     val List: Type.Ctor1[scala.List]                    = Type.Ctor1.of[scala.List]
@@ -252,4 +323,5 @@ private[baklava] object SchemaMacrosImpl {
 
   case object Declined                            extends Exception with scala.util.control.NoStackTrace
   final case class NotDerivable(typeName: String) extends Exception with scala.util.control.NoStackTrace
+  final case class NotASum(typeName: String)      extends Exception with scala.util.control.NoStackTrace
 }

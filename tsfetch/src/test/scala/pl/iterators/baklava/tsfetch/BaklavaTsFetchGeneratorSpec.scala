@@ -257,8 +257,38 @@ class BaklavaTsFetchGeneratorSpec extends AnyFunSpec with Matchers {
     }
   }
 
+  describe("sum types and recursive types (#141)") {
+
+    def shapesTypesTs(schema: BaklavaSchemaSerializable): String = {
+      cleanSrc()
+      val base = getCall("/shapes", tag = Some("Shapes"))
+      generateAndRead("src/shapes/types.ts", Seq(base.let(c => c.copy(response = c.response.copy(bodySchema = Some(schema))))))
+    }
+
+    it("renders a discriminated sum as a union of tagged subtype interfaces") {
+      val typesTs = shapesTypesTs(BaklavaSchemaSerializable(implicitly[Schema[Checkout]]))
+      typesTs should include("""payment: ({ type: "CardPayment" } & CardPayment) | ({ type: "CashPayment" } & Record<string, unknown>);""")
+      typesTs should include("export interface CardPayment")
+      typesTs should include("reference: string | number;")
+    }
+
+    it("lets a recursive interface refer to itself") {
+      val typesTs = shapesTypesTs(BaklavaSchemaSerializable(implicitly[Schema[TreeNode]]))
+      typesTs should include("children: TreeNode[];")
+      typesTs should include("parent?: TreeNode | null;")
+    }
+  }
+
   case class Variant(url: String, width: Int)
   case class ImageDto(id: String, variants: Map[String, Variant])
+  sealed trait PaymentKind
+  case class CardPayment(last4: String) extends PaymentKind
+  case object CashPayment               extends PaymentKind
+  object PaymentKind {
+    implicit val schema: Schema[PaymentKind] = Schema.derivedSum[PaymentKind](SumEncoding.Discriminator("type"))
+  }
+  case class Checkout(payment: PaymentKind, reference: Either[String, Int])
+  case class TreeNode(label: String, children: List[TreeNode], parent: Option[TreeNode])
   case class NullableWidget(id: Int, note: Option[String], tags: Seq[Option[String]], counts: Map[String, Option[Int]])
 
   private def namedObject(name: String, props: Map[String, PrimitiveSchema[?]]): BaklavaSchemaSerializable =

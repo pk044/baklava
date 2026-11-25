@@ -31,6 +31,10 @@ Endpoints whose body isn't a named schema (multipart, plain-text, empty) keep th
 raw `bodyJson: String` input. Endpoints whose 2xx response isn't a named JSON schema keep
 the raw `Either[String, String]` response, so you can still use them without circe.
 
+Fields whose type is a sum type (a sealed trait, an `Either`) are typed as `io.circe.Json`.
+A case class that refers to itself gets a companion with a `deriveCodec` instance, since
+`generic.auto` cannot derive recursive types on Scala 3.
+
 ## Dependencies
 
 ```scala

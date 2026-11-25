@@ -25,6 +25,8 @@ object BaklavaDslFormatterOpenAPIWorker {
     }
     val _ = openAPI.components(components)
 
+    val converter = OpenApiSchemaConverter.forCalls(calls, jsonToJavaObject)
+
     calls.groupBy(_.request.symbolicPath).toList.sortBy(_._1).foreach { case (path, calls) =>
       val pathItem = new io.swagger.v3.oas.models.PathItem()
       calls.groupBy(_.request.method).toList.sortBy(_._1.map(_.method)).foreach { case (method, calls) =>
@@ -47,7 +49,7 @@ object BaklavaDslFormatterOpenAPIWorker {
               .sortBy(_.name.toLowerCase)
           mergedResponseHeaders.foreach { header =>
             val h = new io.swagger.v3.oas.models.headers.Header()
-            h.schema(baklavaSchemaToOpenAPISchema(header.schema))
+            h.schema(converter.convert(header.schema))
             h.setRequired(header.schema.required)
             header.description.foreach(h.setDescription)
             caseInsensitiveHeaderLookup(commonStatusCalls, header.name).map(coerceExample(_, h.getSchema)).foreach(h.example)
@@ -63,7 +65,7 @@ object BaklavaDslFormatterOpenAPIWorker {
               val commonContentTypeCalls = unsortedContentTypeCalls.sortBy(_.request.responseDescription.getOrElse(""))
               val mediaType              = new io.swagger.v3.oas.models.media.MediaType()
               val firstSchema            = commonContentTypeCalls.flatMap(_.response.bodySchema).headOption
-              firstSchema.foreach(schema => mediaType.schema(baklavaSchemaToOpenAPISchema(schema)))
+              firstSchema.foreach(schema => mediaType.schema(converter.convert(schema)))
 
               val usedExampleKeys = scala.collection.mutable.Set.empty[String]
               commonContentTypeCalls.zipWithIndex.foreach { case (BaklavaSerializableCall(ctx, response), idx) =>
@@ -108,7 +110,7 @@ object BaklavaDslFormatterOpenAPIWorker {
             // (e.g. GET requests with no payload).
             if (contentType.isDefined || firstSchema.isDefined || hasAnyBody) {
               val mediaType = new io.swagger.v3.oas.models.media.MediaType()
-              firstSchema.foreach(schema => mediaType.schema(baklavaSchemaToOpenAPISchema(schema)))
+              firstSchema.foreach(schema => mediaType.schema(converter.convert(schema)))
 
               val usedRequestExampleKeys = scala.collection.mutable.Set.empty[String]
               calls.zipWithIndex.foreach { case (call, idx) =>
@@ -170,7 +172,7 @@ object BaklavaDslFormatterOpenAPIWorker {
             parameter.setIn("query")
             parameter.setRequired(queryParam.schema.required)
             parameter.setExplode(true) // I guess this is default?
-            parameter.setSchema(baklavaSchemaToOpenAPISchema(queryParam.schema))
+            parameter.setSchema(converter.convert(queryParam.schema))
             queryParam.description.foreach(parameter.setDescription)
             attachParameterExamples(parameter, collectQueryExamples(calls, queryParam.name))
             parameter
@@ -185,7 +187,7 @@ object BaklavaDslFormatterOpenAPIWorker {
             parameter.setIn("path")
             // Path params must always be `required: true` per OAS 3.x.
             parameter.setRequired(true)
-            parameter.setSchema(baklavaSchemaToOpenAPISchema(pathParam.schema))
+            parameter.setSchema(converter.convert(pathParam.schema))
             pathParam.description.foreach(parameter.setDescription)
             attachParameterExamples(parameter, collectPathExamples(calls, pathParam.name))
             parameter
@@ -205,7 +207,7 @@ object BaklavaDslFormatterOpenAPIWorker {
             parameter.setName(header.name)
             parameter.setIn("header")
             parameter.setRequired(header.schema.required)
-            parameter.setSchema(baklavaSchemaToOpenAPISchema(header.schema))
+            parameter.setSchema(converter.convert(header.schema))
             header.description.foreach(parameter.setDescription)
             attachParameterExamples(parameter, collectHeaderExamples(calls, header.name))
             parameter
@@ -219,6 +221,11 @@ object BaklavaDslFormatterOpenAPIWorker {
         calls.head.request.pathDescription.foreach(pathItem.setDescription)
       }
       openAPI.path(path, pathItem)
+    }
+
+    val existingSchemas = Option(components.getSchemas).map(_.asScala.keySet.toSet).getOrElse(Set.empty)
+    converter.components.foreach { case (name, schema) =>
+      if (!existingSchemas.contains(name)) { val _ = components.addSchemas(name, schema) }
     }
   }
 
@@ -403,54 +410,6 @@ object BaklavaDslFormatterOpenAPIWorker {
     calls.iterator
       .flatMap(_.response.headers.find(_.name.toLowerCase == lowered).map(_.value))
       .nextOption()
-  }
-
-  private def baklavaSchemaToOpenAPISchema(baklavaSchema: BaklavaSchemaSerializable): Schema[?] = {
-    val schema = new Schema[String]()
-    // A named object type carries an `x-class` extension so post-processors can lift it into
-    // components/schemas; a *pure* map (no declared properties, just `additionalProperties: <schema>`)
-    // is structural rather than a named class, so it's left untagged. An object that has both
-    // declared properties and a catch-all is still a named DTO and keeps its `x-class`.
-    val isPureMap = baklavaSchema.additionalPropertiesSchema.isDefined && baklavaSchema.properties.isEmpty
-    if (baklavaSchema.`type` == SchemaType.ObjectType && !isPureMap) {
-      schema.extensions(
-        Map
-          .apply[String, AnyRef](
-            "x-class" -> baklavaSchema.className
-          )
-          .asJava
-      )
-      ()
-    }
-    baklavaSchema.`type` match {
-      case SchemaType.NullType    => schema.setType("null")
-      case SchemaType.StringType  => schema.setType("string")
-      case SchemaType.BooleanType => schema.setType("boolean")
-      case SchemaType.IntegerType => schema.setType("integer")
-      case SchemaType.NumberType  => schema.setType("number")
-      case SchemaType.ArrayType   => schema.setType("array")
-      case SchemaType.ObjectType  => schema.setType("object")
-    }
-    baklavaSchema.description.foreach(schema.setDescription)
-    baklavaSchema.format.foreach(schema.setFormat)
-    if (baklavaSchema.nullable) schema.setNullable(true)
-    baklavaSchema.items.foreach(bs => schema.setItems(baklavaSchemaToOpenAPISchema(bs)))
-    baklavaSchema.properties.foreach { case (name, bs) =>
-      schema.addProperty(name, baklavaSchemaToOpenAPISchema(bs))
-    }
-    // OAS 3.0: null must also be listed among enum values to pass validation
-    baklavaSchema.`enum`.foreach { e =>
-      val values = if (baklavaSchema.nullable) e.toList :+ (null: String) else e.toList
-      schema.setEnum(values.asJava)
-    }
-    baklavaSchema.default.map(jsonToJavaObject).foreach(schema.setDefault)
-    schema.setRequired(baklavaSchema.properties.toList.filter(_._2.required).map(_._1).asJava)
-    baklavaSchema.additionalPropertiesSchema match {
-      case Some(bs) => schema.setAdditionalProperties(baklavaSchemaToOpenAPISchema(bs))
-      case None     => if (baklavaSchema.additionalProperties) schema.setAdditionalProperties(baklavaSchema.additionalProperties)
-    }
-
-    schema
   }
 
   // OpenAPI keys `content` by media type only, so drop any `;charset=…` / `;boundary=…` parameters before grouping.
