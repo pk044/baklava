@@ -42,6 +42,11 @@ class BaklavaSttpRequestBuildingSpec
       "https://api.example.com/x?y=1"
     }
 
+    it("sends the query exactly as it was built, keeping percent-encoded delimiters and values apart") {
+      BaklavaSttp.resolveUri(Uri.unsafeParse("https://api.example.com"), "/x?tags=a%2Cb,c&ids=1%202&f=x%7Cy#top").toString shouldBe
+      "https://api.example.com/x?tags=a%2Cb,c&ids=1%202&f=x%7Cy#top"
+    }
+
     it("tolerates a trailing slash on the base URI") {
       BaklavaSttp.resolveUri(Uri.unsafeParse("https://api.example.com/"), "/x").toString shouldBe
       "https://api.example.com/x"

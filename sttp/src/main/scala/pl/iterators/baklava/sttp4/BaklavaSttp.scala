@@ -199,8 +199,11 @@ object BaklavaSttp {
     // a query/fragment on the base would end up embedded mid-URI — always a spec-authoring bug
     if (baseUri.querySegments.nonEmpty || baseUri.fragmentSegment.isDefined)
       throw new IllegalArgumentException(s"baseUri must not carry a query or fragment: $baseUri")
-    Uri
-      .parse(baseUri.toString.stripSuffix("/") + path)
+    val (beforeFragment, fragment) = path.span(_ != '#')
+    val (pathOnly, query)          = beforeFragment.span(_ != '?')
+    val resolved                   = Uri
+      .parse(baseUri.toString.stripSuffix("/") + pathOnly + fragment)
       .fold(error => throw new IllegalArgumentException(s"Could not build request URI: $error"), identity)
+    if (query.length > 1) resolved.addQuerySegment(Uri.QuerySegment.Plain(query.drop(1), identity[String])) else resolved
   }
 }
