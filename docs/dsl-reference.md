@@ -410,7 +410,8 @@ Path parameters are defined using the [`p[T]()`](https://github.com/theiterators
 ```scala
 def p[T](
   name: String,
-  description: String = ""
+  description: String = "",
+  style: PathStyle = PathStyle.Simple
 )(implicit tsm: ToPathParam[T], schema: Schema[T]): PathParam[T]
 ```
 
@@ -419,6 +420,9 @@ def p[T](
 - Primitives: `String`, `Int`, `Long`, `Double`, `Float`, `Boolean`, `Byte`, `Short`, `Char`
 - `BigDecimal`
 - `java.util.UUID`
+- `Seq[T]`, `List[T]`, `Vector[T]`, `Set[T]`, `Array[T]` for multi-value segments
+
+`style` selects how the value is written into the path (`simple`, `label` or `matrix`). See [Collection Parameters](query-collections.md#path-parameters).
 
 #### Examples
 
@@ -446,7 +450,8 @@ Query parameters are defined using the [`q[T]()`](https://github.com/theiterator
 ```scala
 def q[T](
   name: String,
-  description: String = ""
+  description: String = "",
+  collectionStyle: CollectionStyle = CollectionStyle.Exploded
 )(implicit tsm: ToQueryParam[T], schema: Schema[T]): QueryParam[T]
 ```
 
@@ -454,7 +459,9 @@ def q[T](
 
 - All path parameter types
 - `Option[T]` for optional parameters
-- `Seq[T]` for multi-value parameters
+- `Seq[T]`, `List[T]`, `Vector[T]`, `Set[T]`, `Array[T]` for multi-value parameters
+
+`collectionStyle` selects how a multi-value parameter is written into the URL: repeated (`?ids=1&ids=2`, the default), comma-separated, pipe-delimited or space-delimited. See [Collection Parameters](query-collections.md).
 
 #### Examples
 
@@ -469,8 +476,11 @@ queryParameters = (
   q[Option[String]]("sort", "Sort field")
 )
 
-// Multi-value parameter
+// Multi-value parameter, sent as ?tags=scala&tags=api
 queryParameters = q[Seq[String]]("tags", "Filter by tags")
+
+// Multi-value parameter, sent as ?ids=1,2,3
+queryParameters = q[Seq[Int]]("ids", "Filter by ids", collectionStyle = CollectionStyle.CommaSeparated)
 
 // Providing values in onRequest
 onRequest(queryParameters = ("search term"))
@@ -836,5 +846,6 @@ onRequest(
 ## See Also
 
 - [Installation Guide](installation.md) - Setting up Baklava
+- [Collection Parameters](query-collections.md) - Multi-value query and path parameters
 - [Output Formats](output-formats.md) - Generating documentation
 - [Configuration](configuration.md) - Configuring Baklava

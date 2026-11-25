@@ -158,6 +158,7 @@ Full documentation is available at [theiterators.github.io/baklava](https://thei
 - [http4s Integration](https://theiterators.github.io/baklava/docs/http4s)
 - [Remote APIs (sttp)](https://theiterators.github.io/baklava/docs/sttp)
 - [DSL Reference](https://theiterators.github.io/baklava/docs/dsl-reference)
+- [Collection Parameters](https://theiterators.github.io/baklava/docs/query-collections)
 - [Examples](https://theiterators.github.io/baklava/docs/examples)
 - [Standalone Scripts (scala-cli)](https://theiterators.github.io/baklava/docs/scala-cli)
 - [Output Formats](https://theiterators.github.io/baklava/docs/output-formats)
